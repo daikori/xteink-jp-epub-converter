@@ -195,21 +195,21 @@ function convertRubyToParentheses(source: string): { text: string; count: number
 /**
  * <p>...</p> の先頭に空の <span></span> を挿入する。
  *
- * 修正した2つのバグ:
+ * 修正したバグ:
  *
- * バグ①: 改行展開された属性を持つ <html> タグへの誤マッチ
- *   以前: `<p(?:\s[^>]*)?>` は <html\n class="vrtl"\n...> にマッチしていた。
- *   修正: `<p([ \t][^>]*)?>` に変更。改行を含む属性展開にマッチしない。
+ * <p>直後の空白が <span> より前に出る
+ *   以前: `(<p...>)(\s*)<span></span>` の順で置換していたため、
+ *        <p>　<span></span>テキスト のように空白が先頭に残っていた。
+ *   修正: 空白キャプチャを削除し `openTag + <span></span>` のみ返す。
+ *        Python版の p_tag.insert(0, empty_span) と同じ振る舞いになる。
  *
- * バグ②: <p>直後の空白が <span> より前に出る
- *   以前: `($1)($2=空白)<span></span>` の順で置換していた。
- *   修正: 空白キャプチャを除外し `$1<span></span>` のみ返す。
- *          Python版の p_tag.insert(0, empty_span) と同じ振る舞いになる。
+ * 備考: 属性マッチングに `[ \t]` を使用し改行を含む属性展開への誤マッチを防止。
+ *   元EPUBのXHTMLが最初から属性改行展開されている場合もあるが、
+ *   現時点では実被バグは未確認。将来の安全層として残す。
  */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
 
-  // バグ①修正: [ \t] のみ許可（改行は含めない）。バグ②修正: 空白キャプチャを削除。
   const text = source.replace(/(<p([ \t][^>]*)?>)/gi, (_match, openTag) => {
     count++;
     return `${openTag}<span></span>`;
