@@ -1,4 +1,4 @@
-# Xteink X4 EPUB Formatter
+# Xteink JP EPUB Converter
 
 Xteink X4向けにEPUBをブラウザ内だけで整形する静的Webアプリです。
 
