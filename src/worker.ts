@@ -1,4 +1,4 @@
-import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
+import { unzipSync, zipSync, strToU8 } from 'fflate';
 
 type Options = {
   convertRuby: boolean;
@@ -122,18 +122,13 @@ function buildOutputName(fileName: string) {
  * XML/HTML宣言の charset を優先し、見つからなければ UTF-8 にフォールバック。
  */
 function decodeBytes(bytes: Uint8Array): string {
-  // まず UTF-8 で試し読みして charset 宣言を探す
   const probe = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 512));
-
-  // <?xml ... encoding="shift_jis" ?> または <meta charset="...">
   const xmlEnc = probe.match(/<?xml[^>]*encoding=["']([^"']+)["']/i);
   const metaEnc = probe.match(/<meta[^>]+charset=["']?([\w-]+)["'?]/i);
   const charset = (xmlEnc?.[1] || metaEnc?.[1] || 'utf-8').toLowerCase();
-
   try {
     return new TextDecoder(charset, { fatal: true }).decode(bytes);
   } catch {
-    // 宣言charset が使えない場合は UTF-8 で再試行
     return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   }
 }
@@ -164,68 +159,34 @@ function processMarkup(source: string, options: Options) {
 
 /**
  * <ruby>漢字<rt>かんじ</rt></ruby> → 漢字（かんじ）
- *
- * 対応パターン:
- *   - <ruby>BASE<rt>RUBY</rt></ruby>
- *   - <ruby><rb>BASE</rb><rt>RUBY</rt></ruby>
- *   - 複数のBASE+RTペアを含むrubyタグ
- *   - <rp>は無視
  */
 function convertRubyToParentheses(source: string): { text: string; count: number } {
   let count = 0;
 
-  // <ruby>...</ruby> ブロックを全て検出（入れ子なし前提、EPUBの通常構造）
   const text = source.replace(/<ruby([^>]*)>([\s\S]*?)<\/ruby>/gi, (_match, _attrs, inner) => {
     count++;
-
-    // <rp>...</rp> を除去
     const noRp = inner.replace(/<rp[^>]*>[\s\S]*?<\/rp>/gi, '');
-
-    // <rb>BASE</rb><rt>RUBY</rt> または BASE<rt>RUBY</rt> のペアを変換
-    let result = '';
-    let remaining = noRp;
-
-    // rtタグを区切りとして処理
-    const rtPattern = /<rt([^>]*)>([\s\S]*?)<\/rt>/gi;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    rtPattern.lastIndex = 0;
-    const noRpClean = noRp;
-
-    // RTタグごとに前のテキスト（rb含む）＋rt内容 を「テキスト（ルビ）」に変換
     const parts: string[] = [];
     let cursor = 0;
     const rtRegex = /<rt[^>]*>([\s\S]*?)<\/rt>/gi;
     let rtMatch: RegExpExecArray | null;
 
-    while ((rtMatch = rtRegex.exec(noRpClean)) !== null) {
-      const before = noRpClean.slice(cursor, rtMatch.index);
-      // <rb>...</rb> タグがあればその中身を取り出す、なければタグを除去してテキストだけ取る
+    while ((rtMatch = rtRegex.exec(noRp)) !== null) {
+      const before = noRp.slice(cursor, rtMatch.index);
       const baseText = before.replace(/<rb[^>]*>([\s\S]*?)<\/rb>/gi, '$1').replace(/<[^>]+>/g, '').trim();
       const rubyText = rtMatch[1].replace(/<[^>]+>/g, '').trim();
-
-      if (baseText) {
-        parts.push(`${baseText}（${rubyText}）`);
-      } else {
-        parts.push(`（${rubyText}）`);
-      }
+      parts.push(baseText ? `${baseText}（${rubyText}）` : `（${rubyText}）`);
       cursor = rtMatch.index + rtMatch[0].length;
     }
 
-    // RTタグ以降に残ったテキストを追加
-    const tail = noRpClean.slice(cursor).replace(/<[^>]+>/g, '').trim();
+    const tail = noRp.slice(cursor).replace(/<[^>]+>/g, '').trim();
     if (tail) parts.push(tail);
 
-    result = parts.join('');
-
-    // 何もマッチしなかった場合はinner全体からタグを除去してフォールバック
-    if (!result) {
-      result = inner.replace(/<[^>]+>/g, '').trim();
-      count--; // 変換できなかったのでカウントしない
+    if (!parts.length) {
+      count--;
+      return inner.replace(/<[^>]+>/g, '').trim();
     }
-
-    return result;
+    return parts.join('');
   });
 
   return { text, count };
@@ -233,21 +194,29 @@ function convertRubyToParentheses(source: string): { text: string; count: number
 
 /**
  * <p>...</p> の先頭に空の <span></span> を挿入する。
- * すでに空のspanが先頭にある場合はスキップ。
+ *
+ * 修正した2つのバグ:
+ *
+ * バグ①: 改行展開された属性を持つ <html> タグへの誤マッチ
+ *   以前: `<p(?:\s[^>]*)?>` は <html\n class="vrtl"\n...> にマッチしていた。
+ *   修正: `<p([ \t][^>]*)?>` に変更。改行を含む属性展開にマッチしない。
+ *
+ * バグ②: <p>直後の空白が <span> より前に出る
+ *   以前: `($1)($2=空白)<span></span>` の順で置換していた。
+ *   修正: 空白キャプチャを除外し `$1<span></span>` のみ返す。
+ *          Python版の p_tag.insert(0, empty_span) と同じ振る舞いになる。
  */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
 
-  const text = source.replace(/(<p(?:\s[^>]*)?>)(\s*)/gi, (match, openTag, space) => {
-    // 直後が空のspanなら二重挿入しない
-    // 呼び出し側が置換後の文字列全体を受け取るため、lookaheadは使えないので
-    // 後処理で二重span除去を行う
+  // バグ①修正: [ \t] のみ許可（改行は含めない）。バグ②修正: 空白キャプチャを削除。
+  const text = source.replace(/(<p([ \t][^>]*)?>)/gi, (_match, openTag) => {
     count++;
-    return `${openTag}${space}<span></span>`;
+    return `${openTag}<span></span>`;
   });
 
-  // 二重挿入ガード: <span></span><span></span> → <span></span>
-  const deduped = text.replace(/(<span><\/span>){2,}/g, '<span></span>');
+  // 二重挿入ガード: 先頭に既に空 span があれば除去
+  const deduped = text.replace(/(<p(?:[ \t][^>]*)?>)(<span><\/span>){2,}/gi, '$1<span></span>');
 
   return { text: deduped, count };
 }
