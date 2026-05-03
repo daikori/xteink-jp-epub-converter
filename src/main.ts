@@ -100,7 +100,7 @@ app.innerHTML = `
     </main>
 
     <footer class="footer">
-      <p>© 2025 daikori — <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a></p>
+      <p>© 2026 daikori — <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a></p>
     </footer>
   </div>
 `;
