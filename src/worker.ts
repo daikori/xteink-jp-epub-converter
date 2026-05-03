@@ -36,7 +36,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     const outputEntries: Record<string, [Uint8Array, { level: number }]> = {};
 
     const names = Object.keys(zipEntries);
-    if (!names.includes('mimetype')) throw new Error('mimetype が見つからない。EPUBではないかもしれない。');
+    if (!names.includes('mimetype')) throw new Error('mimetype が見つかりません。EPUBではないかもしれません。');
 
     const htmlNames = names.filter((name) => /\.(xhtml|html|htm)$/i.test(name));
     let processed = 0;
@@ -194,18 +194,6 @@ function convertRubyToParentheses(source: string): { text: string; count: number
 
 /**
  * <p>...</p> の先頭に空の <span></span> を挿入する。
- *
- * 修正したバグ:
- *
- * <p>直後の空白が <span> より前に出る
- *   以前: `(<p...>)(\s*)<span></span>` の順で置換していたため、
- *        <p>　<span></span>テキスト のように空白が先頭に残っていた。
- *   修正: 空白キャプチャを削除し `openTag + <span></span>` のみ返す。
- *        Python版の p_tag.insert(0, empty_span) と同じ振る舞いになる。
- *
- * 備考: 属性マッチングに `[ \t]` を使用し改行を含む属性展開への誤マッチを防止。
- *   元EPUBのXHTMLが最初から属性改行展開されている場合もあるが、
- *   現時点では実被バグは未確認。将来の安全層として残す。
  */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
