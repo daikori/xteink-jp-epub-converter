@@ -17,7 +17,7 @@ app.innerHTML = `
         </div>
         <div>
           <p class="eyebrow">Browser-only EPUB tool</p>
-          <h1>Xteink X4 EPUB Formatter</h1>
+          <h1>Xteink JP EPUB Converter</h1>
         </div>
       </div>
       <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
@@ -27,24 +27,24 @@ app.innerHTML = `
 
     <main id="main" class="main-grid">
       <section class="hero card">
-        <p class="kicker">プライバシー優先</p>
-        <h2>EPUBはブラウザ内だけで処理</h2>
-        <p class="lead">ファイルはサーバーに送信されず、この端末の中だけで展開・整形・再生成される。壊れたEPUBや巨大なEPUBでは処理に時間がかかることがある。</p>
+        <p class="kicker"これはなに？</p>
+        <h2>EPUBの行頭文字下げ、ルビ表示ができるよう変換します</h2>
+        <p class="lead">Xteink には、行頭が2文字分下がる、ルビ付きの行が表示されないといった仕様があります。本Webアプリでは、これらの問題を解消するため、以下の内容でEPUBを変換します。</p>
         <ul class="feature-list" role="list">
-          <li>ruby を「漢字（かんじ）」へ変換</li>
-          <li>各 p タグ先頭に空 span を追加</li>
-          <li>EPUB を再パックして即ダウンロード</li>
+          <li>ルビタグ を「漢字（かんじ）」のように変換します</li>
+          <li>各 p タグ先頭に空 span を追加します。これによりXteink側に p タグを誤認させ、行頭の字下げを文章側にて入られた全角空白を見るようにします</li>
+          <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
         </ul>
       </section>
 
       <section class="panel card uploader-panel">
         <div class="section-head">
           <p class="kicker">変換</p>
-          <h2>EPUBを選ぶ</h2>
+          <h2>EPUB を指定する</h2>
         </div>
         <label class="dropzone" id="dropzone">
           <input id="fileInput" type="file" accept=".epub,application/epub+zip" />
-          <span class="dropzone-title">ここにEPUBをドロップ、またはクリック</span>
+          <span class="dropzone-title">ここにEPUBをドロップ、またはクリックしてください</span>
           <span class="dropzone-subtitle">推奨サイズは50MB以下</span>
         </label>
         <div class="selected-file" id="selectedFile" hidden></div>
@@ -58,7 +58,7 @@ app.innerHTML = `
         </div>
         <div class="progress-block" aria-live="polite">
           <div class="progress-meta">
-            <span id="statusText">EPUBを選択してね。</span>
+            <span id="statusText">EPUBを選択してください</span>
             <span id="progressPercent">0%</span>
           </div>
           <div class="progress-bar"><div id="progressFill"></div></div>
@@ -78,22 +78,22 @@ app.innerHTML = `
         </div>
         <div class="log-wrap">
           <h3>ログ</h3>
-          <pre id="logBox">まだ処理していない。</pre>
+          <pre id="logBox">まだ処理をしていません。</pre>
         </div>
       </section>
 
       <section class="panel card notes-panel">
         <div class="section-head">
-          <p class="kicker">仕様</p>
-          <h2>このツールの前提</h2>
+          <p class="kicker">詳細仕様</p>
+          <h2>このツールについて</h2>
         </div>
         <ul class="notes" role="list">
-          <li>処理対象は EPUB 内の .xhtml / .html / .htm。</li>
-          <li>mimetype は先頭かつ無圧縮で再格納する。</li>
-          <li>壊れた文書はスキップし、可能な分だけ継続する。</li>
-          <li>ブラウザ内処理なので非常に大きいEPUBは重くなることがある。</li>
-          <li>Pages公開後はURL経由で開くこと。ローカル直開きより安定しやすい。</li>
-          <li>問題が出たら別ブラウザやローカルHTTPサーバー経由での確認も試す。</li>
+          <li>処理対象は EPUB 内の .xhtml / .html / .htm　となります</li>
+          <li>mimetype は先頭かつ無圧縮で再格納するようにしています</li>
+          <li>壊れた文書はスキップし、可能な分だけ継続します</li>
+          <li>ブラウザ内処理なので、サイズの大きい EPUB はブラウザが重くなる場合があります</li>
+          <li>このサイトを利用することに伴ういかなる不利益において、サイト側は一切責任を負いませんのでご注意ください</li>
+          <li>EPUB ファイルを変換するので、EPUB の著作権、著作者人格権（同一性保持権等）、出版権、ライセンス条件その他関連する権利関係は、すべて利用者自身の責任でお願いします</li>
         </ul>
       </section>
     </main>
@@ -148,7 +148,7 @@ function setFile(file: File | null) {
   if (!file) {
     selectedFile.hidden = true;
     convertButton.disabled = true;
-    setProgress(0, 'EPUBを選択してね。');
+    setProgress(0, 'EPUBを選択してください');
     return;
   }
   selectedFile.hidden = false;
@@ -212,7 +212,7 @@ worker.addEventListener('message', (event: MessageEvent) => {
     outputName = data.payload.fileName;
     downloadButton.disabled = false;
     convertButton.disabled = false;
-    setProgress(100, '変換完了。ダウンロードできる。');
+    setProgress(100, '変換完了。ダウンロードできます。');
     statHtml.textContent = String(data.payload.summary.htmlFiles);
     statRuby.textContent = String(data.payload.summary.rubyConversions);
     statSpan.textContent = String(data.payload.summary.spanInsertions);
@@ -223,7 +223,7 @@ worker.addEventListener('message', (event: MessageEvent) => {
 
   convertButton.disabled = false;
   setProgress(0, `エラー: ${data.payload.message}`);
-  logBox.textContent = `ERROR: ${data.payload.message}\nEPUBが壊れている、またはサポート外の構造の可能性がある。`; 
+  logBox.textContent = `ERROR: ${data.payload.message}\nEPUBが壊れている、またはサポート外の構造の可能性があります。`; 
 });
 
 downloadButton.addEventListener('click', () => {
