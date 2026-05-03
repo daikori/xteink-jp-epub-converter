@@ -27,7 +27,7 @@ app.innerHTML = `
 
     <main id="main" class="main-grid">
       <section class="hero card">
-        <p class="kicker"これはなに？</p>
+        <p class="kicker">これはなに？</p>
         <h2>EPUBの行頭文字下げ、ルビ表示ができるよう変換します</h2>
         <p class="lead">Xteink には、行頭が2文字分下がる、ルビ付きの行が表示されないといった仕様があります。本Webアプリでは、これらの問題を解消するため、以下の内容でEPUBを変換します。</p>
         <ul class="feature-list" role="list">
@@ -94,9 +94,14 @@ app.innerHTML = `
           <li>ブラウザ内処理なので、サイズの大きい EPUB はブラウザが重くなる場合があります</li>
           <li>このサイトを利用することに伴ういかなる不利益において、サイト側は一切責任を負いませんのでご注意ください</li>
           <li>EPUB ファイルを変換するので、EPUB の著作権、著作者人格権（同一性保持権等）、出版権、ライセンス条件その他関連する権利関係は、すべて利用者自身の責任でお願いします</li>
+          <li>ソースコードは <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a> で公開しています</li>
         </ul>
       </section>
     </main>
+
+    <footer class="footer">
+      <p>© 2025 daikori — <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a></p>
+    </footer>
   </div>
 `;
 

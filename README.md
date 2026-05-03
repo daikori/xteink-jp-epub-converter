@@ -2,6 +2,10 @@
 
 Xteink X4向けにEPUBをブラウザ内だけで整形する静的Webアプリです。
 
+## Webアプリ
+
+https://xteink-jp-epub-converter.pages.dev/
+
 ## 特徴
 
 - EPUBファイルはブラウザ内だけで処理されます
