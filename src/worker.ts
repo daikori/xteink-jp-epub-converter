@@ -264,13 +264,31 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
 
 /**
  * <p>...</p> の先頭に空の <span></span> を挿入する。
+ *
+ * ただし、p タグの中身が br タグと空白文字のみで構成されている場合はスキップする。
+ * これは convertBrToEmptyP() と組み合わせたとき、<p><br/></p> が
+ * <p><span></span><br/></p> に変換されてしまい br 変換の正規表現に
+ * マッチしなくなるのを防ぐため。
+ *
+ * スキップ対象の例:
+ *   <p><br/></p>       → spanを挿入しない
+ *   <p>  <br />  </p>  → spanを挿入しない
+ *   <p><br/><br/></p>  → spanを挿入しない
  */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
 
-  const text = source.replace(/(<p([ \t][^>]*)?>)/gi, (_match, openTag) => {
+  // brタグ・空白文字・半角スペースのみで構成されたpタグにマッチする正規表現
+  // <p> </p>（変換済み空白行）へのspan挿入も防ぐ
+  const brOnlyP = /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>| )(?:\s|<br\s*\/?>| )*<\/p)(?:\s|<br\s*\/?>| )+<\/p\s*>$/i;
+
+  const text = source.replace(/(<p(?:[ \t][^>]*)?>)((?:[\s\S]*?))(<\/p\s*>)/gi, (match, openTag, inner, closeTag) => {
+    // 中身がbrタグと空白のみの場合はspanを挿入しない
+    if (brOnlyP.test(match)) {
+      return match;
+    }
     count++;
-    return `${openTag}<span></span>`;
+    return `${openTag}<span></span>${inner}${closeTag}`;
   });
 
   // 二重挿入ガード: 先頭に既に空 span があれば除去
