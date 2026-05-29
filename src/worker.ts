@@ -206,25 +206,40 @@ function convertRubyToParentheses(source: string): { text: string; count: number
 }
 
 /**
- * p タグ外にある <br> / <br/> / <br /> タグを <p> </p> に変換する。
+ * br タグを <p> </p> に変換する。対象は以下の2ケース:
  *
- * Xteink は仕様上 br タグを無視するため、p タグ内に半角スペースを入れた
- * 空段落に置き換えることで、空白行（改行）として認識させる。
+ * 1. p タグ外に単独で存在する br タグ
+ *      例: <br>  <br/>  <br />
  *
- * 対象: p タグの外側に単独で存在する br タグのみ。
- * p タグ内の br タグは変換しない。
+ * 2. p タグ内に br タグ（と空白文字）しか含まれない場合
+ *      例: <p><br/></p>  <p>  <br />  </p>  <p>\n<br>\n</p>
+ *    ※ p タグ内に br 以外のテキスト・タグが含まれる場合は変換しない
+ *      例: <p>文章<br/>続き</p>  → 変換しない
  *
- * 対応する書き方:
- *   <br>   <br/>   <br />  （大文字 BR も同様）
+ * Xteink は仕様上 br タグを無視するため、半角スペースを含む空段落
+ * <p> </p> に置き換えることで空白行として認識させる。
+ *
+ * 対応する書き方: <br>  <br/>  <br />  （大文字 BR も同様）
  */
 function convertBrToEmptyP(source: string): { text: string; count: number } {
   let count = 0;
+  let text = source;
 
-  // p タグ内かどうかを追いながらトークン単位で処理する。
-  // HTMLを「タグ」と「テキストノード」に分割し、p タグのネスト深度を管理する。
-  // p タグの外にある br タグのみを <p> </p> に置き換える。
-  let depth = 0; // p タグのネスト深度（通常は 0 か 1）
-  const result = source.replace(
+  // --- パス1: pタグ内にbrタグ（と空白文字）しか含まれない場合を変換 ---
+  // <p> + (空白* + <br...> + 空白*)+ + </p> にマッチ
+  // 空白文字: スペース・タブ・改行 (\s)
+  text = text.replace(
+    /<p(?:\s[^>]*)?>(\s*<br\s*\/?>\s*)+<\/p\s*>/gi,
+    () => {
+      count++;
+      return '<p> </p>';
+    }
+  );
+
+  // --- パス2: pタグ外にある brタグを変換 ---
+  // pタグのネスト深度を管理しながらトークン単位で処理する。
+  let depth = 0;
+  text = text.replace(
     /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
     (match, closeP, openP, br) => {
       if (openP !== undefined) {
@@ -235,7 +250,7 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
         if (depth > 0) depth--;
         return match;
       }
-      // br タグ: p タグ外のみ変換
+      // br タグ: pタグ外のみ変換
       if (br !== undefined && depth === 0) {
         count++;
         return '<p> </p>';
@@ -244,7 +259,7 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
     }
   );
 
-  return { text: result, count };
+  return { text, count };
 }
 
 /**
