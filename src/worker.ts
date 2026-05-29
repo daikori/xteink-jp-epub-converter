@@ -3,6 +3,7 @@ import { unzipSync, zipSync, strToU8 } from 'fflate';
 type Options = {
   convertRuby: boolean;
   addEmptySpan: boolean;
+  convertBrToEmptyP: boolean;
 };
 
 type ProcessRequest = {
@@ -18,6 +19,7 @@ type Summary = {
   htmlFiles: number;
   rubyConversions: number;
   spanInsertions: number;
+  brConversions: number;
   warnings: string[];
   logs: string[];
 };
@@ -32,7 +34,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     postProgress(5, 'EPUBを展開中...');
 
     const zipEntries = unzipSync(new Uint8Array(fileBuffer));
-    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, warnings: [], logs: [] };
+    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, brConversions: 0, warnings: [], logs: [] };
     const outputEntries: Record<string, [Uint8Array, { level: number }]> = {};
 
     const names = Object.keys(zipEntries);
@@ -62,7 +64,8 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
         const result = processMarkup(source, options);
         summary.rubyConversions += result.rubyConversions;
         summary.spanInsertions += result.spanInsertions;
-        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}`);
+        summary.brConversions += result.brConversions;
+        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}, br=${result.brConversions}`);
         outputEntries[name] = [strToU8(result.text), { level: 6 }];
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +79,9 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     }
     if (options.addEmptySpan && summary.spanInsertions === 0 && summary.htmlFiles > 0) {
       summary.logs.push('INFO: <p>タグが見つかりませんでした');
+    }
+    if (options.convertBrToEmptyP && summary.brConversions === 0 && summary.htmlFiles > 0) {
+      summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
     }
 
     postProgress(90, 'EPUBを再構築中...');
@@ -141,6 +147,7 @@ function processMarkup(source: string, options: Options) {
   let text = source;
   let rubyConversions = 0;
   let spanInsertions = 0;
+  let brConversions = 0;
 
   if (options.convertRuby) {
     const result = convertRubyToParentheses(text);
@@ -154,7 +161,13 @@ function processMarkup(source: string, options: Options) {
     spanInsertions = result.count;
   }
 
-  return { text, rubyConversions, spanInsertions };
+  if (options.convertBrToEmptyP) {
+    const result = convertBrToEmptyP(text);
+    text = result.text;
+    brConversions = result.count;
+  }
+
+  return { text, rubyConversions, spanInsertions, brConversions };
 }
 
 /**
@@ -190,6 +203,48 @@ function convertRubyToParentheses(source: string): { text: string; count: number
   });
 
   return { text, count };
+}
+
+/**
+ * p タグ外にある <br> / <br/> / <br /> タグを <p> </p> に変換する。
+ *
+ * Xteink は仕様上 br タグを無視するため、p タグ内に半角スペースを入れた
+ * 空段落に置き換えることで、空白行（改行）として認識させる。
+ *
+ * 対象: p タグの外側に単独で存在する br タグのみ。
+ * p タグ内の br タグは変換しない。
+ *
+ * 対応する書き方:
+ *   <br>   <br/>   <br />  （大文字 BR も同様）
+ */
+function convertBrToEmptyP(source: string): { text: string; count: number } {
+  let count = 0;
+
+  // p タグ内かどうかを追いながらトークン単位で処理する。
+  // HTMLを「タグ」と「テキストノード」に分割し、p タグのネスト深度を管理する。
+  // p タグの外にある br タグのみを <p> </p> に置き換える。
+  let depth = 0; // p タグのネスト深度（通常は 0 か 1）
+  const result = source.replace(
+    /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
+    (match, closeP, openP, br) => {
+      if (openP !== undefined) {
+        depth++;
+        return match;
+      }
+      if (closeP !== undefined) {
+        if (depth > 0) depth--;
+        return match;
+      }
+      // br タグ: p タグ外のみ変換
+      if (br !== undefined && depth === 0) {
+        count++;
+        return '<p> </p>';
+      }
+      return match;
+    }
+  );
+
+  return { text: result, count };
 }
 
 /**

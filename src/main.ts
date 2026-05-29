@@ -51,6 +51,7 @@ app.innerHTML = `
         <div class="toggles">
           <label class="toggle"><input id="rubyToggle" type="checkbox" checked />ルビを括弧書きへ変換</label>
           <label class="toggle"><input id="spanToggle" type="checkbox" checked />p先頭に空spanを追加</label>
+          <label class="toggle"><input id="brToggle" type="checkbox" checked />&lt;br&gt;タグを空白行に変換（Xteink br無視対策）</label>
         </div>
         <div class="actions">
           <button id="convertButton" class="btn btn-primary" type="button" disabled>変換する</button>
@@ -74,6 +75,7 @@ app.innerHTML = `
           <article class="stat"><span class="stat-label">HTML/XHTML</span><strong id="statHtml">0</strong></article>
           <article class="stat"><span class="stat-label">Ruby変換</span><strong id="statRuby">0</strong></article>
           <article class="stat"><span class="stat-label">Span追加</span><strong id="statSpan">0</strong></article>
+          <article class="stat"><span class="stat-label">br変換</span><strong id="statBr">0</strong></article>
           <article class="stat"><span class="stat-label">警告</span><strong id="statWarn">0</strong></article>
         </div>
         <div class="log-wrap">
@@ -112,12 +114,14 @@ const convertButton = document.querySelector<HTMLButtonElement>('#convertButton'
 const downloadButton = document.querySelector<HTMLButtonElement>('#downloadButton')!;
 const rubyToggle = document.querySelector<HTMLInputElement>('#rubyToggle')!;
 const spanToggle = document.querySelector<HTMLInputElement>('#spanToggle')!;
+const brToggle = document.querySelector<HTMLInputElement>('#brToggle')!;
 const statusText = document.querySelector<HTMLSpanElement>('#statusText')!;
 const progressPercent = document.querySelector<HTMLSpanElement>('#progressPercent')!;
 const progressFill = document.querySelector<HTMLDivElement>('#progressFill')!;
 const statHtml = document.querySelector<HTMLElement>('#statHtml')!;
 const statRuby = document.querySelector<HTMLElement>('#statRuby')!;
 const statSpan = document.querySelector<HTMLElement>('#statSpan')!;
+const statBr = document.querySelector<HTMLElement>('#statBr')!;
 const statWarn = document.querySelector<HTMLElement>('#statWarn')!;
 const logBox = document.querySelector<HTMLElement>('#logBox')!;
 
@@ -183,6 +187,7 @@ convertButton.addEventListener('click', async () => {
   statHtml.textContent = '0';
   statRuby.textContent = '0';
   statSpan.textContent = '0';
+  statBr.textContent = '0';
   statWarn.textContent = '0';
   logBox.textContent = '処理開始...';
   setProgress(2, 'ファイル読み込み中...');
@@ -195,7 +200,8 @@ convertButton.addEventListener('click', async () => {
       fileBuffer: buffer,
       options: {
         convertRuby: rubyToggle.checked,
-        addEmptySpan: spanToggle.checked
+        addEmptySpan: spanToggle.checked,
+        convertBrToEmptyP: brToggle.checked
       }
     }
   }, [buffer]);
@@ -204,7 +210,7 @@ convertButton.addEventListener('click', async () => {
 worker.addEventListener('message', (event: MessageEvent) => {
   const data = event.data as
     | { type: 'progress'; payload: { progress: number; message: string } }
-    | { type: 'done'; payload: { blob: Blob; fileName: string; summary: { htmlFiles: number; rubyConversions: number; spanInsertions: number; warnings: string[]; logs: string[] } } }
+    | { type: 'done'; payload: { blob: Blob; fileName: string; summary: { htmlFiles: number; rubyConversions: number; spanInsertions: number; brConversions: number; warnings: string[]; logs: string[] } } }
     | { type: 'error'; payload: { message: string } };
 
   if (data.type === 'progress') {
@@ -221,6 +227,7 @@ worker.addEventListener('message', (event: MessageEvent) => {
     statHtml.textContent = String(data.payload.summary.htmlFiles);
     statRuby.textContent = String(data.payload.summary.rubyConversions);
     statSpan.textContent = String(data.payload.summary.spanInsertions);
+    statBr.textContent = String(data.payload.summary.brConversions);
     statWarn.textContent = String(data.payload.summary.warnings.length);
     logBox.textContent = [...data.payload.summary.logs, ...data.payload.summary.warnings.map((w) => `WARN: ${w}`)].join('\n') || 'ログなし';
     return;
