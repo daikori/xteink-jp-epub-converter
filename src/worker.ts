@@ -3,6 +3,7 @@ import { unzipSync, zipSync, strToU8 } from 'fflate';
 type Options = {
   convertRuby: boolean;
   addEmptySpan: boolean;
+  convertVerticalChars: boolean;
 };
 
 type ProcessRequest = {
@@ -18,6 +19,7 @@ type Summary = {
   htmlFiles: number;
   rubyConversions: number;
   spanInsertions: number;
+  verticalCharConversions: number;
   warnings: string[];
   logs: string[];
 };
@@ -32,7 +34,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     postProgress(5, 'EPUBを展開中...');
 
     const zipEntries = unzipSync(new Uint8Array(fileBuffer));
-    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, warnings: [], logs: [] };
+    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, verticalCharConversions: 0, warnings: [], logs: [] };
     const outputEntries: Record<string, [Uint8Array, { level: number }]> = {};
 
     const names = Object.keys(zipEntries);
@@ -62,7 +64,8 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
         const result = processMarkup(source, options);
         summary.rubyConversions += result.rubyConversions;
         summary.spanInsertions += result.spanInsertions;
-        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}`);
+        summary.verticalCharConversions += result.verticalCharConversions;
+        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}, tate=${result.verticalCharConversions}`);
         outputEntries[name] = [strToU8(result.text), { level: 6 }];
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +79,9 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     }
     if (options.addEmptySpan && summary.spanInsertions === 0 && summary.htmlFiles > 0) {
       summary.logs.push('INFO: <p>タグが見つかりませんでした');
+    }
+    if (options.convertVerticalChars && summary.verticalCharConversions === 0 && summary.htmlFiles > 0) {
+      summary.logs.push('INFO: 縦書き変換対象の文字が見つかりませんでした');
     }
 
     postProgress(90, 'EPUBを再構築中...');
@@ -141,6 +147,7 @@ function processMarkup(source: string, options: Options) {
   let text = source;
   let rubyConversions = 0;
   let spanInsertions = 0;
+  let verticalCharConversions = 0;
 
   if (options.convertRuby) {
     const result = convertRubyToParentheses(text);
@@ -154,7 +161,13 @@ function processMarkup(source: string, options: Options) {
     spanInsertions = result.count;
   }
 
-  return { text, rubyConversions, spanInsertions };
+  if (options.convertVerticalChars) {
+    const result = convertVerticalChars(text);
+    text = result.text;
+    verticalCharConversions = result.count;
+  }
+
+  return { text, rubyConversions, spanInsertions, verticalCharConversions };
 }
 
 /**
@@ -190,6 +203,99 @@ function convertRubyToParentheses(source: string): { text: string; count: number
   });
 
   return { text, count };
+}
+
+/**
+ * 縦書き表示で横向きになりやすい文字を縦書き用Unicode文字に変換する。
+ *
+ * narou.rb (whiteleaf7/narou) の converterbase.rb における文字変換処理を参考に、
+ * EPUBフォント環境で罫線・括弧・記号が横向きのまま表示される問題に対応する。
+ *
+ * 変換対象：
+ *   - ダッシュ/罫線類：― ‥ … ー（長音連続）など
+ *   - 括弧類：全角括弧を縦書き用Presentation Formsへ
+ *   - その他記号：縦組み向けUnicode文字への置換
+ *
+ * テキストノード（タグ外のテキスト）のみを変換し、HTMLタグ属性・CDATA内は変更しない。
+ */
+function convertVerticalChars(source: string): { text: string; count: number } {
+  let count = 0;
+
+  // HTMLタグ・タグ属性を保護しながらテキストノード部分のみ変換する
+  // タグを分割子として使い、タグでない部分（テキストノード）にのみ変換を適用する
+  const text = source.replace(/(<[^>]*>)|([^<]+)/g, (_match, tag, textNode) => {
+    // タグ部分はそのまま返す
+    if (tag !== undefined) return tag;
+    // テキストノードを変換
+    const replaced = replaceVerticalCharsInText(textNode);
+    count += replaced.count;
+    return replaced.text;
+  });
+
+  return { text, count };
+}
+
+/**
+ * テキスト文字列に対して縦書き向け文字置換を実施する。
+ *
+ * 変換ルール（narou.rb converterbase.rb 準拠）:
+ * 1. 罫線類 ― (U+2015 HORIZONTAL BAR) → ︱ (U+FE31 VERTICAL EM DASH)
+ *    ※ EPUBフォントで ― が横向き罫線として描画されるケースへの対応
+ * 2. 二点リーダー ‥ (U+2025) → ︰ (U+FE30 VERTICAL TWO DOT LEADER)
+ * 3. 三点リーダー … (U+2026) → ︙ (U+FE19 VERTICAL HORIZONTAL ELLIPSIS)
+ * 4. 全角ダッシュ — (U+2014 EM DASH) も縦向きへ → ︱ (U+FE31)
+ * 5. 括弧類を縦書き用Presentation Formsへ
+ *    （ → ︵  ） → ︶
+ *    ｛ → ︷  ｝ → ︸
+ *    〔 → ︹  〕 → ︺
+ *    【 → ︻  】 → ︼
+ *    《 → ︽  》 → ︾
+ *    〈 → ︿  〉 → ﹀
+ *    「 → ﹁  」 → ﹂
+ *    『 → ﹃  』 → ﹄
+ */
+function replaceVerticalCharsInText(text: string): { text: string; count: number } {
+  let count = 0;
+
+  // 変換テーブル: [変換前, 変換後] のペア
+  // narou.rb が縦書き用に変換・推奨する文字セットに準拠
+  const VERTICAL_CHAR_MAP: [RegExp, string][] = [
+    // 罫線・ダッシュ類
+    [/\u2015/g, '\uFE31'],  // ― HORIZONTAL BAR → ︱ VERTICAL EM DASH
+    [/\u2014/g, '\uFE31'],  // — EM DASH → ︱ VERTICAL EM DASH
+    [/\u2025/g, '\uFE30'],  // ‥ TWO DOT LEADER → ︰ VERTICAL TWO DOT LEADER
+    [/\u2026/g, '\uFE19'],  // … HORIZONTAL ELLIPSIS → ︙ VERTICAL HORIZONTAL ELLIPSIS
+    // 括弧類（全角 → 縦書き用Presentation Forms）
+    [/\uFF08/g, '\uFE35'],  // （ FULLWIDTH LEFT PARENTHESIS → ︵
+    [/\uFF09/g, '\uFE36'],  // ） FULLWIDTH RIGHT PARENTHESIS → ︶
+    [/\uFF5B/g, '\uFE37'],  // ｛ FULLWIDTH LEFT CURLY BRACKET → ︷
+    [/\uFF5D/g, '\uFE38'],  // ｝ FULLWIDTH RIGHT CURLY BRACKET → ︸
+    [/\u3014/g, '\uFE39'],  // 〔 LEFT TORTOISE SHELL BRACKET → ︹
+    [/\u3015/g, '\uFE3A'],  // 〕 RIGHT TORTOISE SHELL BRACKET → ︺
+    [/\u3010/g, '\uFE3B'],  // 【 LEFT BLACK LENTICULAR BRACKET → ︻
+    [/\u3011/g, '\uFE3C'],  // 】 RIGHT BLACK LENTICULAR BRACKET → ︼
+    [/\u300A/g, '\uFE3D'],  // 《 LEFT DOUBLE ANGLE BRACKET → ︽
+    [/\u300B/g, '\uFE3E'],  // 》 RIGHT DOUBLE ANGLE BRACKET → ︾
+    [/\u3008/g, '\uFE3F'],  // 〈 LEFT ANGLE BRACKET → ︿
+    [/\u3009/g, '\uFE40'],  // 〉 RIGHT ANGLE BRACKET → ﹀
+    [/\u300C/g, '\uFE41'],  // 「 LEFT CORNER BRACKET → ﹁
+    [/\u300D/g, '\uFE42'],  // 」 RIGHT CORNER BRACKET → ﹂
+    [/\u300E/g, '\uFE43'],  // 『 LEFT WHITE CORNER BRACKET → ﹃
+    [/\u300F/g, '\uFE44'],  // 』 RIGHT WHITE CORNER BRACKET → ﹄
+  ];
+
+  let result = text;
+  for (const [pattern, replacement] of VERTICAL_CHAR_MAP) {
+    const before = result;
+    result = result.replace(pattern, replacement);
+    if (result !== before) {
+      // 変換された文字数をカウント（置換回数を加算）
+      const matches = before.match(pattern);
+      if (matches) count += matches.length;
+    }
+  }
+
+  return { text: result, count };
 }
 
 /**
