@@ -29,10 +29,11 @@ app.innerHTML = `
       <section class="hero card">
         <p class="kicker">これはなに？</p>
         <h2>EPUBの行頭文字下げ、ルビ表示ができるよう変換します</h2>
-        <p class="lead">Xteink には、行頭が2文字分下がる、ルビ付きの行が表示されないといった仕様があります。本Webアプリでは、これらの問題を解消するため、以下の内容でEPUBを変換します。</p>
+        <p class="lead">Xteink には、行頭が2文字分下がる、ルビが表示されない、改行が無視されるなどといった仕様があります。本Webアプリでは、これらの問題を解消するため、以下の内容でEPUBを変換します。</p>
         <ul class="feature-list" role="list">
           <li>ルビタグ を「漢字（かんじ）」のように変換します</li>
-          <li>各 p タグ先頭に空 span を追加します。これによりXteink側に p タグを誤認させ、行頭の字下げを文章側にて入られた全角空白を見るようにします</li>
+          <li>各 p タグ先頭の直後に空 span を追加します。これにより Xteink 側に p タグを誤認させ、行頭の字下げを文章側の行頭（全角スペース）で見るようにします</li>
+          <li>空白行を挿入する目的で入れられた改行（ br タグ）を p タグ + 半角スペースに変換して、Xteink 側に改行として認識させます</li>
           <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
         </ul>
       </section>
@@ -51,7 +52,7 @@ app.innerHTML = `
         <div class="toggles">
           <label class="toggle"><input id="rubyToggle" type="checkbox" checked />ルビを括弧書きへ変換</label>
           <label class="toggle"><input id="spanToggle" type="checkbox" checked />p先頭に空spanを追加</label>
-          <label class="toggle"><input id="brToggle" type="checkbox" checked />&lt;br&gt;タグを空白行に変換（Xteink br無視対策）</label>
+          <label class="toggle"><input id="brToggle" type="checkbox" checked />&lt;br&gt;タグを空白行に変換</label>
         </div>
         <div class="actions">
           <button id="convertButton" class="btn btn-primary" type="button" disabled>変換する</button>
