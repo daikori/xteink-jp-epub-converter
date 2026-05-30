@@ -3,6 +3,7 @@ import { unzipSync, zipSync, strToU8 } from 'fflate';
 type Options = {
   convertRuby: boolean;
   addEmptySpan: boolean;
+  convertBrToEmptyP: boolean;
 };
 
 type ProcessRequest = {
@@ -18,6 +19,7 @@ type Summary = {
   htmlFiles: number;
   rubyConversions: number;
   spanInsertions: number;
+  brConversions: number;
   warnings: string[];
   logs: string[];
 };
@@ -32,7 +34,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     postProgress(5, 'EPUBを展開中...');
 
     const zipEntries = unzipSync(new Uint8Array(fileBuffer));
-    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, warnings: [], logs: [] };
+    const summary: Summary = { htmlFiles: 0, rubyConversions: 0, spanInsertions: 0, brConversions: 0, warnings: [], logs: [] };
     const outputEntries: Record<string, [Uint8Array, { level: number }]> = {};
 
     const names = Object.keys(zipEntries);
@@ -62,7 +64,8 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
         const result = processMarkup(source, options);
         summary.rubyConversions += result.rubyConversions;
         summary.spanInsertions += result.spanInsertions;
-        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}`);
+        summary.brConversions += result.brConversions;
+        summary.logs.push(`${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}, br=${result.brConversions}`);
         outputEntries[name] = [strToU8(result.text), { level: 6 }];
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +79,9 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
     }
     if (options.addEmptySpan && summary.spanInsertions === 0 && summary.htmlFiles > 0) {
       summary.logs.push('INFO: <p>タグが見つかりませんでした');
+    }
+    if (options.convertBrToEmptyP && summary.brConversions === 0 && summary.htmlFiles > 0) {
+      summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
     }
 
     postProgress(90, 'EPUBを再構築中...');
@@ -141,6 +147,7 @@ function processMarkup(source: string, options: Options) {
   let text = source;
   let rubyConversions = 0;
   let spanInsertions = 0;
+  let brConversions = 0;
 
   if (options.convertRuby) {
     const result = convertRubyToParentheses(text);
@@ -154,7 +161,13 @@ function processMarkup(source: string, options: Options) {
     spanInsertions = result.count;
   }
 
-  return { text, rubyConversions, spanInsertions };
+  if (options.convertBrToEmptyP) {
+    const result = convertBrToEmptyP(text);
+    text = result.text;
+    brConversions = result.count;
+  }
+
+  return { text, rubyConversions, spanInsertions, brConversions };
 }
 
 /**
@@ -193,14 +206,89 @@ function convertRubyToParentheses(source: string): { text: string; count: number
 }
 
 /**
+ * br タグを <p> </p> に変換する。対象は以下の2ケース:
+ *
+ * 1. p タグ外に単独で存在する br タグ
+ *      例: <br>  <br/>  <br />
+ *
+ * 2. p タグ内に br タグ（と空白文字）しか含まれない場合
+ *      例: <p><br/></p>  <p>  <br />  </p>  <p>\n<br>\n</p>
+ *    ※ p タグ内に br 以外のテキスト・タグが含まれる場合は変換しない
+ *      例: <p>文章<br/>続き</p>  → 変換しない
+ *
+ * Xteink は仕様上 br タグを無視するため、半角スペースを含む空段落
+ * <p> </p> に置き換えることで空白行として認識させる。
+ *
+ * 対応する書き方: <br>  <br/>  <br />  （大文字 BR も同様）
+ */
+function convertBrToEmptyP(source: string): { text: string; count: number } {
+  let count = 0;
+  let text = source;
+
+  // --- パス1: pタグ内にbrタグ（と空白文字）しか含まれない場合を変換 ---
+  // <p> + (空白* + <br...> + 空白*)+ + </p> にマッチ
+  // 空白文字: スペース・タブ・改行 (\s)
+  text = text.replace(
+    /<p(?:\s[^>]*)?>(\s*<br\s*\/?>\s*)+<\/p\s*>/gi,
+    () => {
+      count++;
+      return '<p> </p>';
+    }
+  );
+
+  // --- パス2: pタグ外にある brタグを変換 ---
+  // pタグのネスト深度を管理しながらトークン単位で処理する。
+  let depth = 0;
+  text = text.replace(
+    /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
+    (match, closeP, openP, br) => {
+      if (openP !== undefined) {
+        depth++;
+        return match;
+      }
+      if (closeP !== undefined) {
+        if (depth > 0) depth--;
+        return match;
+      }
+      // br タグ: pタグ外のみ変換
+      if (br !== undefined && depth === 0) {
+        count++;
+        return '<p> </p>';
+      }
+      return match;
+    }
+  );
+
+  return { text, count };
+}
+
+/**
  * <p>...</p> の先頭に空の <span></span> を挿入する。
+ *
+ * ただし、p タグの中身が br タグと空白文字のみで構成されている場合はスキップする。
+ * これは convertBrToEmptyP() と組み合わせたとき、<p><br/></p> が
+ * <p><span></span><br/></p> に変換されてしまい br 変換の正規表現に
+ * マッチしなくなるのを防ぐため。
+ *
+ * スキップ対象の例:
+ *   <p><br/></p>       → spanを挿入しない
+ *   <p>  <br />  </p>  → spanを挿入しない
+ *   <p><br/><br/></p>  → spanを挿入しない
  */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
 
-  const text = source.replace(/(<p([ \t][^>]*)?>)/gi, (_match, openTag) => {
+  // brタグ・空白文字・半角スペースのみで構成されたpタグにマッチする正規表現
+  // <p> </p>（変換済み空白行）へのspan挿入も防ぐ
+  const brOnlyP = /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>| )(?:\s|<br\s*\/?>| )*<\/p)(?:\s|<br\s*\/?>| )+<\/p\s*>$/i;
+
+  const text = source.replace(/(<p(?:[ \t][^>]*)?>)((?:[\s\S]*?))(<\/p\s*>)/gi, (match, openTag, inner, closeTag) => {
+    // 中身がbrタグと空白のみの場合はspanを挿入しない
+    if (brOnlyP.test(match)) {
+      return match;
+    }
     count++;
-    return `${openTag}<span></span>`;
+    return `${openTag}<span></span>${inner}${closeTag}`;
   });
 
   // 二重挿入ガード: 先頭に既に空 span があれば除去
