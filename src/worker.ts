@@ -2,15 +2,15 @@ import { unzipSync, zipSync, strToU8 } from 'fflate';
 
 type CoverMode = 'none' | 'generate';
 
+type CoverOptions =
+  | { mode: 'none' }
+  | { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string };
+
 type Options = {
   convertRuby: boolean;
   addEmptySpan: boolean;
   convertBrToEmptyP: boolean;
-  cover: {
-    mode: CoverMode;
-    imageBuffer?: ArrayBuffer;
-    imageType?: string;
-  };
+  cover: CoverOptions;
 };
 
 type ProcessRequest = {
@@ -91,15 +91,15 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
       summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
     }
 
-    // --- 表紙処理 ---
+    // 表紙を適用
     if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
-      postProgress(85, '表紙を挿入中...');
+      postProgress(85, '表紙を適用中...');
       try {
-        applyCoverToEpub(outputEntries, zipEntries, names, options.cover.imageBuffer, options.cover.imageType ?? 'image/jpeg');
-        summary.logs.push('INFO: 表紙画像を挿入しました');
+        applyCoverToEpub(outputEntries, options.cover.imageBuffer, options.cover.imageType, names);
+        summary.logs.push('INFO: 表紙を自動生成して設定しました');
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        summary.warnings.push(`表紙挿入失敗: ${msg}`);
+        summary.warnings.push(`表紙設定に失敗しました: ${msg}`);
       }
     }
 
@@ -113,10 +113,10 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
       if (!entry) continue;
       orderedEntries.push([name, entry[0], entry[1]]);
     }
-    // 新規追加エントリを末尾に付加
-    for (const [entryName, entry] of Object.entries(outputEntries)) {
-      if (!names.includes(entryName) && entryName !== 'mimetype') {
-        orderedEntries.push([entryName, entry[0], entry[1]]);
+    // outputEntriesに新規追加されたエントリ（表紙画像など）を追加
+    for (const [key, entry] of Object.entries(outputEntries)) {
+      if (!names.includes(key) && key !== 'mimetype') {
+        orderedEntries.push([key, entry[0], entry[1]]);
       }
     }
 
@@ -148,6 +148,101 @@ function buildOutputName(fileName: string) {
     : `${fileName}_x4.epub`;
 }
 
+/**
+ * EPUBに表紙画像を適用する。
+ * 以下の優先順位でOPFを解析して既存表紙を置き換え、なければ新規追加する：
+ *  1. <meta name="cover" content="{id}"> からIDを特定
+ *  2. properties="cover-image" を持つ <item> を直接探索
+ *  3. 見つからない場合は OEBPS/Images/cover.jpg として新規追加
+ */
+function applyCoverToEpub(
+  outputEntries: Record<string, [Uint8Array, { level: number }]>,
+  imageBuffer: ArrayBuffer,
+  imageType: string,
+  originalNames: string[]
+): void {
+  // container.xml からOPFパスを取得
+  const containerKey = originalNames.find((n) => /META-INF\/container\.xml$/i.test(n));
+  if (!containerKey) throw new Error('META-INF/container.xml が見つかりません');
+
+  const containerXml = new TextDecoder().decode(outputEntries[containerKey][0]);
+  const opfPathMatch = containerXml.match(/full-path=["']([^"']+\.opf)["']/i);
+  if (!opfPathMatch) throw new Error('OPFパスが取得できませんでした');
+
+  const opfPath = opfPathMatch[1];
+  const opfKey = originalNames.find((n) => n === opfPath) ?? opfPath;
+  if (!outputEntries[opfKey]) throw new Error(`OPFファイルが見つかりません: ${opfPath}`);
+
+  let opfXml = new TextDecoder().decode(outputEntries[opfKey][0]);
+
+  // OPFのベースディレクトリを取得（例: "OEBPS/content.opf" → "OEBPS/"）
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+  // 既存の表紙アイテムを探す
+  let coverHref: string | null = null;
+
+  // 方法1: <meta name="cover"> からIDを特定
+  const metaCoverMatch = opfXml.match(/<meta[^>]+name=["']cover["'][^>]+content=["']([^"']+)["'][^>]*>/i)
+    ?? opfXml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']cover["'][^>]*>/i);
+  if (metaCoverMatch) {
+    const coverId = metaCoverMatch[1];
+    const itemMatch = opfXml.match(new RegExp(`<item[^>]+id=["']${coverId}["'][^>]+href=["']([^"']+)["']`, 'i'))
+      ?? opfXml.match(new RegExp(`<item[^>]+href=["']([^"']+)["'][^>]+id=["']${coverId}["']`, 'i'));
+    if (itemMatch) coverHref = itemMatch[1];
+  }
+
+  // 方法2: properties="cover-image" を持つ item を探す
+  if (!coverHref) {
+    const propMatch = opfXml.match(/<item[^>]+properties=["'][^"']*cover-image[^"']*["'][^>]+href=["']([^"']+)["']/i)
+      ?? opfXml.match(/<item[^>]+href=["']([^"']+)["'][^>]+properties=["'][^"']*cover-image[^"']*["']/i);
+    if (propMatch) coverHref = propMatch[1];
+  }
+
+  const ext = imageType === 'image/png' ? 'png' : 'jpg';
+  const imageBytes = new Uint8Array(imageBuffer);
+
+  if (coverHref) {
+    // 既存の表紙を上書き
+    const fullCoverPath = opfDir + coverHref;
+    const existingKey = originalNames.find((n) => n === fullCoverPath) ?? fullCoverPath;
+    outputEntries[existingKey] = [imageBytes, { level: 6 }];
+
+    // OPFのmedia-typeも更新
+    opfXml = opfXml.replace(
+      new RegExp(`(<item[^>]+href=["']${coverHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]+media-type=["'])[^"\']+(["'])`, 'i'),
+      `$1${imageType}$2`
+    );
+    opfXml = opfXml.replace(
+      new RegExp(`(<item[^>]+media-type=["'])[^"\']+(["'][^>]+href=["']${coverHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'])`, 'i'),
+      `$1${imageType}$2`
+    );
+  } else {
+    // 新規追加: OEBPS/Images/cover.{ext}
+    const newCoverRelPath = `Images/cover.${ext}`;
+    const newCoverFullPath = `${opfDir}${newCoverRelPath}`;
+    outputEntries[newCoverFullPath] = [imageBytes, { level: 6 }];
+
+    // manifestに追加
+    opfXml = opfXml.replace(
+      /(<manifest[^>]*>)/i,
+      `$1\n    <item id="cover-image" href="${newCoverRelPath}" media-type="${imageType}" properties="cover-image"/>`
+    );
+    // guideに追加（任意・なければスキップ）
+    if (/<guide[^>]*>/i.test(opfXml)) {
+      opfXml = opfXml.replace(
+        /(<guide[^>]*>)/i,
+        `$1\n    <reference type="cover" title="Cover" href="${newCoverRelPath}"/>`
+      );
+    }
+  }
+
+  outputEntries[opfKey] = [strToU8(opfXml), { level: 6 }];
+}
+
+/**
+ * Uint8Array をテキストに変換する。
+ * XML/HTML宣言の charset を優先し、見つからなければ UTF-8 にフォールバック。
+ */
 function decodeBytes(bytes: Uint8Array): string {
   const probe = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 512));
   const xmlEnc = probe.match(/<?xml[^>]*encoding=["']([^"']+)["']/i);
@@ -160,6 +255,9 @@ function decodeBytes(bytes: Uint8Array): string {
   }
 }
 
+/**
+ * HTML/XHTML文字列に対して変換処理を行う。
+ */
 function processMarkup(source: string, options: Options) {
   let text = source;
   let rubyConversions = 0;
@@ -171,11 +269,13 @@ function processMarkup(source: string, options: Options) {
     text = result.text;
     rubyConversions = result.count;
   }
+
   if (options.addEmptySpan) {
     const result = addEmptySpanInsideP(text);
     text = result.text;
     spanInsertions = result.count;
   }
+
   if (options.convertBrToEmptyP) {
     const result = convertBrToEmptyP(text);
     text = result.text;
@@ -185,95 +285,9 @@ function processMarkup(source: string, options: Options) {
   return { text, rubyConversions, spanInsertions, brConversions };
 }
 
-// ---------------------------------------------------------------------------
-// 表紙挿入
-// ---------------------------------------------------------------------------
-
-/**
- * OPFを解析し、既存の表紙画像エントリを新しい画像で上書きする。
- * 既存の表紙が見つからない場合は、OPF の manifest に新規エントリを追加する。
- *
- * 対応パターン:
- *   1. <meta name="cover" content="{id}"> でIDを特定 → そのIDの href を上書き
- *   2. <item properties="cover-image"> を直接探す
- *   3. 上記なし → OEBPS/Images/cover.jpg として追加し manifest / guide に登録
- */
-function applyCoverToEpub(
-  outputEntries: Record<string, [Uint8Array, { level: number }]>,
-  originalEntries: Record<string, Uint8Array>,
-  allNames: string[],
-  imageBuffer: ArrayBuffer,
-  imageType: string
-): void {
-  const imageBytes = new Uint8Array(imageBuffer);
-  const ext = imageType === 'image/jpeg' ? 'jpg' : 'png';
-
-  const containerName = allNames.find((n) => n.toLowerCase() === 'meta-inf/container.xml');
-  if (!containerName) throw new Error('META-INF/container.xml が見つかりません');
-
-  const containerXml = new TextDecoder('utf-8', { fatal: false }).decode(originalEntries[containerName]);
-  const rootfileMatch = containerXml.match(/full-path=["']([^"']+)["']/);
-  if (!rootfileMatch) throw new Error('rootfile の full-path が見つかりません');
-
-  const opfPath = rootfileMatch[1];
-  const opfEntry = originalEntries[opfPath] ?? outputEntries[opfPath]?.[0];
-  if (!opfEntry) throw new Error(`OPFファイルが見つかりません: ${opfPath}`);
-
-  let opfXml = new TextDecoder('utf-8', { fatal: false }).decode(opfEntry);
-  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
-
-  // パターン1: <meta name="cover">
-  let coverItemPath: string | null = null;
-  const metaCoverMatch = opfXml.match(/<meta[^>]+name=["']cover["'][^>]+content=["']([^"']+)["'][^>]*>|<meta[^>]+content=["']([^"']+)["'][^>]+name=["']cover["'][^>]*>/i);
-  if (metaCoverMatch) {
-    const coverId = (metaCoverMatch[1] ?? metaCoverMatch[2]).trim();
-    const itemMatch = opfXml.match(new RegExp(`<item[^>]+id=["']${escapeRegex(coverId)}["'][^>]+href=["']([^"']+)["']`, 'i'))
-      ?? opfXml.match(new RegExp(`<item[^>]+href=["']([^"']+)["'][^>]+id=["']${escapeRegex(coverId)}["']`, 'i'));
-    if (itemMatch) coverItemPath = resolveOpfPath(opfDir, itemMatch[1]);
-  }
-
-  // パターン2: properties="cover-image"
-  if (!coverItemPath) {
-    const propMatch = opfXml.match(/<item[^>]+properties=["'][^"']*cover-image[^"']*["'][^>]+href=["']([^"']+)["']|<item[^>]+href=["']([^"']+)["'][^>]+properties=["'][^"']*cover-image[^"']*["']/i);
-    if (propMatch) coverItemPath = resolveOpfPath(opfDir, (propMatch[1] ?? propMatch[2]).trim());
-  }
-
-  if (coverItemPath) {
-    outputEntries[coverItemPath] = [imageBytes, { level: 6 }];
-    const hrefInOpf = coverItemPath.startsWith(opfDir) ? coverItemPath.slice(opfDir.length) : coverItemPath;
-    opfXml = opfXml.replace(
-      new RegExp(`(<item[^>]+href=["']${escapeRegex(hrefInOpf)}["'][^>]+media-type=["'])[^"']+(["'])`, 'i'),
-      `$1${imageType}$2`
-    ).replace(
-      new RegExp(`(<item[^>]+media-type=["'])[^"']+(["'][^>]+href=["']${escapeRegex(hrefInOpf)}["'])`, 'i'),
-      `$1${imageType}$2`
-    );
-  } else {
-    // パターン3: 新規追加
-    const newCoverPath = `${opfDir}Images/cover.${ext}`;
-    outputEntries[newCoverPath] = [imageBytes, { level: 6 }];
-    const newItemTag = `<item id="cover-image" href="Images/cover.${ext}" media-type="${imageType}" properties="cover-image"/>`;
-    opfXml = opfXml.replace(/(\s*)(<\/manifest>)/i, `$1  ${newItemTag}$1$2`);
-    if (!/<guide/i.test(opfXml)) {
-      const guideTag = `<guide>\n  <reference type="cover" title="Cover" href="Images/cover.${ext}"/>\n</guide>`;
-      opfXml = opfXml.replace(/(<\/spine>)/i, `$1\n${guideTag}`);
-    }
-  }
-
-  outputEntries[opfPath] = [strToU8(opfXml), { level: 6 }];
-}
-
-function resolveOpfPath(opfDir: string, href: string): string {
-  if (href.startsWith('/')) return href.slice(1);
-  return opfDir + href;
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function convertRubyToParentheses(source: string): { text: string; count: number } {
   let count = 0;
+
   const text = source.replace(/<ruby([^>]*)>([\s\S]*?)<\/ruby>/gi, (_match, _attrs, inner) => {
     count++;
     const noRp = inner.replace(/<rp[^>]*>[\s\S]*?<\/rp>/gi, '');
@@ -281,6 +295,7 @@ function convertRubyToParentheses(source: string): { text: string; count: number
     let cursor = 0;
     const rtRegex = /<rt[^>]*>([\s\S]*?)<\/rt>/gi;
     let rtMatch: RegExpExecArray | null;
+
     while ((rtMatch = rtRegex.exec(noRp)) !== null) {
       const before = noRp.slice(cursor, rtMatch.index);
       const baseText = before.replace(/<rb[^>]*>([\s\S]*?)<\/rb>/gi, '$1').replace(/<[^>]+>/g, '').trim();
@@ -288,21 +303,29 @@ function convertRubyToParentheses(source: string): { text: string; count: number
       parts.push(baseText ? `${baseText}（${rubyText}）` : `（${rubyText}）`);
       cursor = rtMatch.index + rtMatch[0].length;
     }
+
     const tail = noRp.slice(cursor).replace(/<[^>]+>/g, '').trim();
     if (tail) parts.push(tail);
-    if (!parts.length) { count--; return inner.replace(/<[^>]+>/g, '').trim(); }
+
+    if (!parts.length) {
+      count--;
+      return inner.replace(/<[^>]+>/g, '').trim();
+    }
     return parts.join('');
   });
+
   return { text, count };
 }
 
 function convertBrToEmptyP(source: string): { text: string; count: number } {
   let count = 0;
   let text = source;
+
   text = text.replace(
     /<p(?:\s[^>]*)?>(\s*<br\s*\/?>\s*)+<\/p\s*>/gi,
     () => { count++; return '<p> </p>'; }
   );
+
   let depth = 0;
   text = text.replace(
     /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
@@ -313,17 +336,20 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
       return match;
     }
   );
+
   return { text, count };
 }
 
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
   const brOnlyP = /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>| )(?:\s|<br\s*\/?>| )*<\/p)(?:\s|<br\s*\/?>| )+<\/p\s*>$/i;
+
   const text = source.replace(/(<p(?:[ \t][^>]*)?>)((?:[\s\S]*?))(<\/p\s*>)/gi, (match, openTag, inner, closeTag) => {
     if (brOnlyP.test(match)) return match;
     count++;
     return `${openTag}<span></span>${inner}${closeTag}`;
   });
+
   const deduped = text.replace(/(<p(?:[ \t][^>]*)?>)(<span><\/span>){2,}/gi, '$1<span></span>');
   return { text: deduped, count };
 }
