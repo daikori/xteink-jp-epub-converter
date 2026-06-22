@@ -1,4 +1,5 @@
 import './style.css';
+import { unzipSync } from 'fflate';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
@@ -54,6 +55,28 @@ app.innerHTML = `
           <label class="toggle"><input id="spanToggle" type="checkbox" checked />p先頭に空spanを追加</label>
           <label class="toggle"><input id="brToggle" type="checkbox" checked />&lt;br&gt;タグを空白行に変換</label>
         </div>
+
+        <div class="cover-section">
+          <p class="kicker">表紙設定</p>
+          <div class="cover-modes">
+            <label class="toggle">
+              <input type="radio" name="coverMode" value="none" id="coverNone" checked />
+              設定しない
+            </label>
+            <label class="toggle">
+              <input type="radio" name="coverMode" value="generate" id="coverGenerate" />
+              タイトルから自動生成
+            </label>
+          </div>
+          <div class="cover-generate-panel" id="coverGeneratePanel" hidden>
+            <button type="button" class="btn btn-secondary" id="previewCoverBtn">プレビューを表示</button>
+            <div class="cover-preview-wrap" id="coverPreviewWrap" hidden>
+              <canvas id="coverCanvas" class="cover-canvas"></canvas>
+              <p class="cover-preview-meta" id="coverPreviewMeta"></p>
+            </div>
+          </div>
+        </div>
+
         <div class="actions">
           <button id="convertButton" class="btn btn-primary" type="button" disabled>変換する</button>
           <button id="downloadButton" class="btn btn-secondary" type="button" disabled>ダウンロード</button>
@@ -125,13 +148,210 @@ const statSpan = document.querySelector<HTMLElement>('#statSpan')!;
 const statBr = document.querySelector<HTMLElement>('#statBr')!;
 const statWarn = document.querySelector<HTMLElement>('#statWarn')!;
 const logBox = document.querySelector<HTMLElement>('#logBox')!;
+const coverGeneratePanel = document.querySelector<HTMLDivElement>('#coverGeneratePanel')!;
+const previewCoverBtn = document.querySelector<HTMLButtonElement>('#previewCoverBtn')!;
+const coverPreviewWrap = document.querySelector<HTMLDivElement>('#coverPreviewWrap')!;
+const coverCanvas = document.querySelector<HTMLCanvasElement>('#coverCanvas')!;
+const coverPreviewMeta = document.querySelector<HTMLParagraphElement>('#coverPreviewMeta')!;
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 
 let selected: File | null = null;
 let outputBlob: Blob | null = null;
 let outputName = '';
+let epubTitle = '';
+let epubAuthor = '';
 
+// ---- カバーモード ----
+document.querySelectorAll<HTMLInputElement>('input[name="coverMode"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const mode = (document.querySelector<HTMLInputElement>('input[name="coverMode"]:checked'))?.value ?? 'none';
+    coverGeneratePanel.hidden = mode !== 'generate';
+  });
+});
+
+// ---- EPUBメタデータ取得 ----
+async function extractMetaFromEpub(file: File): Promise<{ title: string; author: string }> {
+  try {
+    const buf = await file.arrayBuffer();
+    const entries = unzipSync(new Uint8Array(buf));
+
+    // container.xml からOPFパスを取得
+    const containerBytes = entries['META-INF/container.xml'];
+    if (!containerBytes) return { title: '', author: '' };
+    const containerXml = new TextDecoder().decode(containerBytes);
+    const opfPathMatch = containerXml.match(/full-path=["']([^"']+\.opf)["']/i);
+    if (!opfPathMatch) return { title: '', author: '' };
+
+    const opfBytes = entries[opfPathMatch[1]];
+    if (!opfBytes) return { title: '', author: '' };
+    const opfXml = new TextDecoder().decode(opfBytes);
+
+    const titleMatch = opfXml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i);
+    const authorMatch = opfXml.match(/<dc:creator[^>]*>([^<]+)<\/dc:creator>/i);
+
+    return {
+      title: titleMatch?.[1]?.trim() ?? '',
+      author: authorMatch?.[1]?.trim() ?? ''
+    };
+  } catch {
+    return { title: '', author: '' };
+  }
+}
+
+// ---- 背景パターン ----
+type PatternFn = (ctx: CanvasRenderingContext2D, W: number, H: number) => void;
+
+const bgPatterns: PatternFn[] = [
+  // 0: シンプル無地
+  (ctx, W, H) => { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); },
+  // 1: 縦ストライプ
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 24) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  },
+  // 2: 斜めストライプ
+  (ctx, W, H) => {
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
+    for (let i = -H; i < W + H; i += 28) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + H, H); ctx.stroke(); }
+  },
+  // 3: ドット
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    const step = 32;
+    for (let x = step / 2; x < W; x += step)
+      for (let y = step / 2; y < H; y += step) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, Math.PI * 2); ctx.fill(); }
+  },
+  // 4: クロスハッチ
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 1;
+    const step = 32;
+    for (let x = 0; x < W; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  },
+  // 5: ボーダーフレーム
+  (ctx, W, H) => {
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
+    ctx.strokeRect(20, 20, W - 40, H - 40);
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1;
+    ctx.strokeRect(28, 28, W - 56, H - 56);
+  },
+];
+
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let current = '';
+  for (const char of text) {
+    const test = current + char;
+    if (ctx.measureText(test).width > maxWidth && current.length > 0) {
+      lines.push(current);
+      current = char;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
+  const W = 480, H = 800;
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+
+  const seed = hashString(title || 'untitled');
+  bgPatterns[seed % bgPatterns.length](ctx, W, H);
+
+  // デコレーションライン
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(48, 80); ctx.lineTo(W - 48, 80); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(48, H - 110); ctx.lineTo(W - 48, H - 110); ctx.stroke();
+
+  // タイトル描画：行数を計算しながらフォントサイズを動的に決定
+  const displayTitle = title || '（タイトルなし）';
+  const maxWidth = W - 96;
+  const FONT_BASE = `'Hiragino Sans', 'Noto Sans JP', 'Yu Gothic', sans-serif`;
+  let fontSize = displayTitle.length <= 10 ? 52 : displayTitle.length <= 20 ? 42 : 34;
+  let lines: string[] = [];
+  while (fontSize >= 22) {
+    ctx.font = `bold ${fontSize}px ${FONT_BASE}`;
+    lines = wrapText(ctx, displayTitle, maxWidth);
+    if (lines.length * fontSize * 1.5 <= H * 0.55) break;
+    fontSize -= 4;
+  }
+
+  const lineHeight = fontSize * 1.5;
+  const totalTextH = lines.length * lineHeight;
+  const titleStartY = H * 0.38 - totalTextH / 2;
+
+  // 文字背景帯（白半透明）
+  const padX = 32, padY = 16;
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.beginPath();
+  (ctx as CanvasRenderingContext2D & { roundRect: Function }).roundRect(
+    W / 2 - maxWidth / 2 - padX,
+    titleStartY - lineHeight / 2 - padY,
+    maxWidth + padX * 2,
+    totalTextH + padY * 2,
+    8
+  );
+  ctx.fill();
+
+  ctx.fillStyle = '#111111';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${fontSize}px ${FONT_BASE}`;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, W / 2, titleStartY + i * lineHeight);
+  });
+
+  // 著者名
+  if (author) {
+    ctx.font = `20px ${FONT_BASE}`;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillText(author, W / 2, H - 68);
+  }
+}
+
+async function getCoverBuffer(): Promise<{ buffer: ArrayBuffer; mimeType: string } | null> {
+  const mode = (document.querySelector<HTMLInputElement>('input[name="coverMode"]:checked'))?.value ?? 'none';
+  if (mode !== 'generate') return null;
+
+  const tmpCanvas = document.createElement('canvas');
+  drawCoverToCanvas(tmpCanvas, epubTitle, epubAuthor);
+  return new Promise((resolve) => {
+    tmpCanvas.toBlob((blob) => {
+      if (!blob) { resolve(null); return; }
+      blob.arrayBuffer().then((buf) => resolve({ buffer: buf, mimeType: 'image/jpeg' }));
+    }, 'image/jpeg', 0.92);
+  });
+}
+
+// ---- プレビューボタン ----
+previewCoverBtn.addEventListener('click', () => {
+  drawCoverToCanvas(coverCanvas, epubTitle, epubAuthor);
+  coverPreviewWrap.hidden = false;
+  const meta = epubTitle ? `「${epubTitle}」${epubAuthor ? ' / ' + epubAuthor : ''}` : '（タイトル未取得）';
+  coverPreviewMeta.textContent = meta;
+});
+
+// ---- テーマ ----
 function setTheme(initial?: 'light' | 'dark') {
   const root = document.documentElement;
   let mode = initial ?? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -155,6 +375,8 @@ function setFile(file: File | null) {
   selected = file;
   outputBlob = null;
   downloadButton.disabled = true;
+  epubTitle = '';
+  epubAuthor = '';
   if (!file) {
     selectedFile.hidden = true;
     convertButton.disabled = true;
@@ -165,6 +387,12 @@ function setFile(file: File | null) {
   selectedFile.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
   convertButton.disabled = false;
   setProgress(0, '変換準備OK。');
+
+  // バックグラウンドでメタデータ取得
+  extractMetaFromEpub(file).then(({ title, author }) => {
+    epubTitle = title;
+    epubAuthor = author;
+  });
 }
 
 fileInput.addEventListener('change', () => setFile(fileInput.files?.[0] ?? null));
@@ -193,7 +421,12 @@ convertButton.addEventListener('click', async () => {
   logBox.textContent = '処理開始...';
   setProgress(2, 'ファイル読み込み中...');
 
+  const cover = await getCoverBuffer();
+
   const buffer = await selected.arrayBuffer();
+  const transferables: Transferable[] = [buffer];
+  if (cover) transferables.push(cover.buffer);
+
   worker.postMessage({
     type: 'process',
     payload: {
@@ -202,10 +435,11 @@ convertButton.addEventListener('click', async () => {
       options: {
         convertRuby: rubyToggle.checked,
         addEmptySpan: spanToggle.checked,
-        convertBrToEmptyP: brToggle.checked
+        convertBrToEmptyP: brToggle.checked,
+        cover: cover ? { mode: 'generate', imageBuffer: cover.buffer, imageType: cover.mimeType } : { mode: 'none' }
       }
     }
-  }, [buffer]);
+  }, transferables);
 });
 
 worker.addEventListener('message', (event: MessageEvent) => {
@@ -236,7 +470,7 @@ worker.addEventListener('message', (event: MessageEvent) => {
 
   convertButton.disabled = false;
   setProgress(0, `エラー: ${data.payload.message}`);
-  logBox.textContent = `ERROR: ${data.payload.message}\nEPUBが壊れている、またはサポート外の構造の可能性があります。`; 
+  logBox.textContent = `ERROR: ${data.payload.message}\nEPUBが壊れている、またはサポート外の構造の可能性があります。`;
 });
 
 downloadButton.addEventListener('click', () => {

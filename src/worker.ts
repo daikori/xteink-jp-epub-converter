@@ -1,9 +1,16 @@
 import { unzipSync, zipSync, strToU8 } from 'fflate';
 
+type CoverMode = 'none' | 'generate';
+
+type CoverOptions =
+  | { mode: 'none' }
+  | { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string };
+
 type Options = {
   convertRuby: boolean;
   addEmptySpan: boolean;
   convertBrToEmptyP: boolean;
+  cover: CoverOptions;
 };
 
 type ProcessRequest = {
@@ -84,6 +91,18 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
       summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
     }
 
+    // 表紙を適用
+    if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
+      postProgress(85, '表紙を適用中...');
+      try {
+        applyCoverToEpub(outputEntries, options.cover.imageBuffer, options.cover.imageType, names);
+        summary.logs.push('INFO: 表紙を自動生成して設定しました');
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        summary.warnings.push(`表紙設定に失敗しました: ${msg}`);
+      }
+    }
+
     postProgress(90, 'EPUBを再構築中...');
 
     const orderedEntries: [string, Uint8Array, { level: number }][] = [];
@@ -93,6 +112,12 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest>) => {
       const entry = outputEntries[name];
       if (!entry) continue;
       orderedEntries.push([name, entry[0], entry[1]]);
+    }
+    // outputEntriesに新規追加されたエントリ（表紙画像など）を追加
+    for (const [key, entry] of Object.entries(outputEntries)) {
+      if (!names.includes(key) && key !== 'mimetype') {
+        orderedEntries.push([key, entry[0], entry[1]]);
+      }
     }
 
     const zipped = zipSync(
@@ -124,6 +149,97 @@ function buildOutputName(fileName: string) {
 }
 
 /**
+ * EPUBに表紙画像を適用する。
+ * 以下の優先順位でOPFを解析して既存表紙を置き換え、なければ新規追加する：
+ *  1. <meta name="cover" content="{id}"> からIDを特定
+ *  2. properties="cover-image" を持つ <item> を直接探索
+ *  3. 見つからない場合は OEBPS/Images/cover.jpg として新規追加
+ */
+function applyCoverToEpub(
+  outputEntries: Record<string, [Uint8Array, { level: number }]>,
+  imageBuffer: ArrayBuffer,
+  imageType: string,
+  originalNames: string[]
+): void {
+  // container.xml からOPFパスを取得
+  const containerKey = originalNames.find((n) => /META-INF\/container\.xml$/i.test(n));
+  if (!containerKey) throw new Error('META-INF/container.xml が見つかりません');
+
+  const containerXml = new TextDecoder().decode(outputEntries[containerKey][0]);
+  const opfPathMatch = containerXml.match(/full-path=["']([^"']+\.opf)["']/i);
+  if (!opfPathMatch) throw new Error('OPFパスが取得できませんでした');
+
+  const opfPath = opfPathMatch[1];
+  const opfKey = originalNames.find((n) => n === opfPath) ?? opfPath;
+  if (!outputEntries[opfKey]) throw new Error(`OPFファイルが見つかりません: ${opfPath}`);
+
+  let opfXml = new TextDecoder().decode(outputEntries[opfKey][0]);
+
+  // OPFのベースディレクトリを取得（例: "OEBPS/content.opf" → "OEBPS/"）
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+  // 既存の表紙アイテムを探す
+  let coverHref: string | null = null;
+
+  // 方法1: <meta name="cover"> からIDを特定
+  const metaCoverMatch = opfXml.match(/<meta[^>]+name=["']cover["'][^>]+content=["']([^"']+)["'][^>]*>/i)
+    ?? opfXml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']cover["'][^>]*>/i);
+  if (metaCoverMatch) {
+    const coverId = metaCoverMatch[1];
+    const itemMatch = opfXml.match(new RegExp(`<item[^>]+id=["']${coverId}["'][^>]+href=["']([^"']+)["']`, 'i'))
+      ?? opfXml.match(new RegExp(`<item[^>]+href=["']([^"']+)["'][^>]+id=["']${coverId}["']`, 'i'));
+    if (itemMatch) coverHref = itemMatch[1];
+  }
+
+  // 方法2: properties="cover-image" を持つ item を探す
+  if (!coverHref) {
+    const propMatch = opfXml.match(/<item[^>]+properties=["'][^"']*cover-image[^"']*["'][^>]+href=["']([^"']+)["']/i)
+      ?? opfXml.match(/<item[^>]+href=["']([^"']+)["'][^>]+properties=["'][^"']*cover-image[^"']*["']/i);
+    if (propMatch) coverHref = propMatch[1];
+  }
+
+  const ext = imageType === 'image/png' ? 'png' : 'jpg';
+  const imageBytes = new Uint8Array(imageBuffer);
+
+  if (coverHref) {
+    // 既存の表紙を上書き
+    const fullCoverPath = opfDir + coverHref;
+    const existingKey = originalNames.find((n) => n === fullCoverPath) ?? fullCoverPath;
+    outputEntries[existingKey] = [imageBytes, { level: 6 }];
+
+    // OPFのmedia-typeも更新
+    opfXml = opfXml.replace(
+      new RegExp(`(<item[^>]+href=["']${coverHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]+media-type=["'])[^"\']+(["'])`, 'i'),
+      `$1${imageType}$2`
+    );
+    opfXml = opfXml.replace(
+      new RegExp(`(<item[^>]+media-type=["'])[^"\']+(["'][^>]+href=["']${coverHref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'])`, 'i'),
+      `$1${imageType}$2`
+    );
+  } else {
+    // 新規追加: OEBPS/Images/cover.{ext}
+    const newCoverRelPath = `Images/cover.${ext}`;
+    const newCoverFullPath = `${opfDir}${newCoverRelPath}`;
+    outputEntries[newCoverFullPath] = [imageBytes, { level: 6 }];
+
+    // manifestに追加
+    opfXml = opfXml.replace(
+      /(<manifest[^>]*>)/i,
+      `$1\n    <item id="cover-image" href="${newCoverRelPath}" media-type="${imageType}" properties="cover-image"/>`
+    );
+    // guideに追加（任意・なければスキップ）
+    if (/<guide[^>]*>/i.test(opfXml)) {
+      opfXml = opfXml.replace(
+        /(<guide[^>]*>)/i,
+        `$1\n    <reference type="cover" title="Cover" href="${newCoverRelPath}"/>`
+      );
+    }
+  }
+
+  outputEntries[opfKey] = [strToU8(opfXml), { level: 6 }];
+}
+
+/**
  * Uint8Array をテキストに変換する。
  * XML/HTML宣言の charset を優先し、見つからなければ UTF-8 にフォールバック。
  */
@@ -141,7 +257,6 @@ function decodeBytes(bytes: Uint8Array): string {
 
 /**
  * HTML/XHTML文字列に対して変換処理を行う。
- * DOMParserを使わず正規表現ベースで処理することでWorker内でも動作する。
  */
 function processMarkup(source: string, options: Options) {
   let text = source;
@@ -170,9 +285,6 @@ function processMarkup(source: string, options: Options) {
   return { text, rubyConversions, spanInsertions, brConversions };
 }
 
-/**
- * <ruby>漢字<rt>かんじ</rt></ruby> → 漢字（かんじ）
- */
 function convertRubyToParentheses(source: string): { text: string; count: number } {
   let count = 0;
 
@@ -205,56 +317,22 @@ function convertRubyToParentheses(source: string): { text: string; count: number
   return { text, count };
 }
 
-/**
- * br タグを <p> </p> に変換する。対象は以下の2ケース:
- *
- * 1. p タグ外に単独で存在する br タグ
- *      例: <br>  <br/>  <br />
- *
- * 2. p タグ内に br タグ（と空白文字）しか含まれない場合
- *      例: <p><br/></p>  <p>  <br />  </p>  <p>\n<br>\n</p>
- *    ※ p タグ内に br 以外のテキスト・タグが含まれる場合は変換しない
- *      例: <p>文章<br/>続き</p>  → 変換しない
- *
- * Xteink は仕様上 br タグを無視するため、半角スペースを含む空段落
- * <p> </p> に置き換えることで空白行として認識させる。
- *
- * 対応する書き方: <br>  <br/>  <br />  （大文字 BR も同様）
- */
 function convertBrToEmptyP(source: string): { text: string; count: number } {
   let count = 0;
   let text = source;
 
-  // --- パス1: pタグ内にbrタグ（と空白文字）しか含まれない場合を変換 ---
-  // <p> + (空白* + <br...> + 空白*)+ + </p> にマッチ
-  // 空白文字: スペース・タブ・改行 (\s)
   text = text.replace(
     /<p(?:\s[^>]*)?>(\s*<br\s*\/?>\s*)+<\/p\s*>/gi,
-    () => {
-      count++;
-      return '<p> </p>';
-    }
+    () => { count++; return '<p> </p>'; }
   );
 
-  // --- パス2: pタグ外にある brタグを変換 ---
-  // pタグのネスト深度を管理しながらトークン単位で処理する。
   let depth = 0;
   text = text.replace(
     /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
     (match, closeP, openP, br) => {
-      if (openP !== undefined) {
-        depth++;
-        return match;
-      }
-      if (closeP !== undefined) {
-        if (depth > 0) depth--;
-        return match;
-      }
-      // br タグ: pタグ外のみ変換
-      if (br !== undefined && depth === 0) {
-        count++;
-        return '<p> </p>';
-      }
+      if (openP !== undefined) { depth++; return match; }
+      if (closeP !== undefined) { if (depth > 0) depth--; return match; }
+      if (br !== undefined && depth === 0) { count++; return '<p> </p>'; }
       return match;
     }
   );
@@ -262,37 +340,16 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   return { text, count };
 }
 
-/**
- * <p>...</p> の先頭に空の <span></span> を挿入する。
- *
- * ただし、p タグの中身が br タグと空白文字のみで構成されている場合はスキップする。
- * これは convertBrToEmptyP() と組み合わせたとき、<p><br/></p> が
- * <p><span></span><br/></p> に変換されてしまい br 変換の正規表現に
- * マッチしなくなるのを防ぐため。
- *
- * スキップ対象の例:
- *   <p><br/></p>       → spanを挿入しない
- *   <p>  <br />  </p>  → spanを挿入しない
- *   <p><br/><br/></p>  → spanを挿入しない
- */
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
-
-  // brタグ・空白文字・半角スペースのみで構成されたpタグにマッチする正規表現
-  // <p> </p>（変換済み空白行）へのspan挿入も防ぐ
   const brOnlyP = /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>| )(?:\s|<br\s*\/?>| )*<\/p)(?:\s|<br\s*\/?>| )+<\/p\s*>$/i;
 
   const text = source.replace(/(<p(?:[ \t][^>]*)?>)((?:[\s\S]*?))(<\/p\s*>)/gi, (match, openTag, inner, closeTag) => {
-    // 中身がbrタグと空白のみの場合はspanを挿入しない
-    if (brOnlyP.test(match)) {
-      return match;
-    }
+    if (brOnlyP.test(match)) return match;
     count++;
     return `${openTag}<span></span>${inner}${closeTag}`;
   });
 
-  // 二重挿入ガード: 先頭に既に空 span があれば除去
   const deduped = text.replace(/(<p(?:[ \t][^>]*)?>)(<span><\/span>){2,}/gi, '$1<span></span>');
-
   return { text: deduped, count };
 }
