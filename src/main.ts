@@ -204,41 +204,41 @@ type PatternFn = (ctx: CanvasRenderingContext2D, W: number, H: number) => void;
 
 const bgPatterns: PatternFn[] = [
   // 0: シンプル無地
-  (ctx, W, H) => { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H); },
+  (ctx, W, H) => { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); },
   // 1: 縦ストライプ
   (ctx, W, H) => {
-    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
     for (let x = 0; x < W; x += 24) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
   },
   // 2: 斜めストライプ
   (ctx, W, H) => {
-    ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
     for (let i = -H; i < W + H; i += 28) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + H, H); ctx.stroke(); }
   },
   // 3: ドット
   (ctx, W, H) => {
-    ctx.fillStyle = '#151515'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
     const step = 32;
     for (let x = step / 2; x < W; x += step)
       for (let y = step / 2; y < H; y += step) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, Math.PI * 2); ctx.fill(); }
   },
   // 4: クロスハッチ
   (ctx, W, H) => {
-    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 1;
     const step = 32;
     for (let x = 0; x < W; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
     for (let y = 0; y < H; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
   },
   // 5: ボーダーフレーム
   (ctx, W, H) => {
-    ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 2;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
     ctx.strokeRect(20, 20, W - 40, H - 40);
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1;
     ctx.strokeRect(28, 28, W - 56, H - 56);
   },
 ];
@@ -278,7 +278,7 @@ function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: str
   bgPatterns[seed % bgPatterns.length](ctx, W, H);
 
   // デコレーションライン
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
   ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(48, 80); ctx.lineTo(W - 48, 80); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(48, H - 110); ctx.lineTo(W - 48, H - 110); ctx.stroke();
@@ -300,9 +300,9 @@ function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: str
   const totalTextH = lines.length * lineHeight;
   const titleStartY = H * 0.38 - totalTextH / 2;
 
-  // 文字背景帯
+  // 文字背景帯（白半透明）
   const padX = 32, padY = 16;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
   ctx.beginPath();
   (ctx as CanvasRenderingContext2D & { roundRect: Function }).roundRect(
     W / 2 - maxWidth / 2 - padX,
@@ -313,7 +313,7 @@ function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: str
   );
   ctx.fill();
 
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = '#111111';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = `bold ${fontSize}px ${FONT_BASE}`;
@@ -324,7 +324,7 @@ function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: str
   // 著者名
   if (author) {
     ctx.font = `20px ${FONT_BASE}`;
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillText(author, W / 2, H - 68);
   }
 }
