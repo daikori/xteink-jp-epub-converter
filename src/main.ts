@@ -221,30 +221,180 @@ dropzone.addEventListener('drop', (e) => {
   if (e.dataTransfer?.files[0]) handleFile(e.dataTransfer.files[0]);
 });
 
-// ── Aozora Bunko search (GitHub Contents API) ────────────────────
+// ── Aozora Bunko search (CSV index) ──────────────────────────
 //
-// aozorabunko/aozorabunko リポジトリのカードHTMLファイルを
-// GitHub Search API でファイル名検索し、作品の book_id を導出。
-// XHTML 本文 URL は
-//   https://www.aozora.gr.jp/cards/<author_id>/files/<book_id>_ruby_<hash>.html
-// の形式だが hash が不明なので、カードページ
-//   https://www.aozora.gr.jp/cards/<author_id>/card<book_id>.html
-// から ZIP リンクをスクレイピングして取得する。
-// スクレイピングは CORS のため allorigins.win プロキシ経由。
+// 青空文庫公式の全作品CSVインデックス（ZIPで配布）をダウンロード・展開し、
+// メモリ上でキャッシュ。作品名・著者名で部分一致検索する。
+// GitHub Search API（/search/code）は2023年以降認証必須（HTTP 401）
+// のため使用しない。
+//
+// CSV: list_person_all_extended_utf8.zip
+//   col 0:  作品名
+//   col 1:  作品名読み
+//   col 2:  作品名ソート用読み
+//   col 3:  副題
+//   col 4:  副題読み
+//   col 5:  原題
+//   col 6:  初出
+//   col 7:  分類番号
+//   col 8:  文字遣い種別
+//   col 9:  作品著作権フラグ
+//   col 10: 公開日
+//   col 11: 最終更新日
+//   col 12: 図書カードURL  (https://www.aozora.gr.jp/cards/<author_id>/card<book_id>.html)
+//   col 13: 人物ID
+//   col 14: 著者名
+//   col 15: 姓
+//   col 16: 名
+//   col 17: 姓読み
+//   col 18: 名読み
+//   col 19: 姓ソート用読み
+//   col 20: 名ソート用読み
+//   col 21: 役割フラグ
+//   col 22: 生年月日
+//   col 23: 没年月日
+//   col 24: 人物著作権フラグ
+//   col 25: 底本名1
+//   col 26: 底本出版社名1
+//   col 27: 底本初版発行年1
+//   col 28: 入力に使用した版1
+//   col 29: 校正に使用した版1
+//   col 30: 底本の親本名1
+//   col 31: 底本の親本出版社名1
+//   col 32: 底本の親本初版発行年1
+//   col 33: 底本名2
+//   col 34: 底本出版社名2
+//   col 35: 底本初版発行年2
+//   col 36: 入力に使用した版2
+//   col 37: 校正に使用した版2
+//   col 38: 底本の親本名2
+//   col 39: 底本の親本出版社名2
+//   col 40: 底本の親本初版発行年2
+//   col 41: テキストファイルURL
+//   col 42: テキストファイル最終更新日
+//   col 43: テキストファイル符号化方式
+//   col 44: テキストファイル文字集合
+//   col 45: テキストファイル修正回数
+//   col 46: XHTML/HTMLファイルURL
+//   col 47: XHTML/HTMLファイル最終更新日
+//   col 48: XHTML/HTMLファイル符号化方式
+//   col 49: XHTML/HTMLファイル文字集合
+//   col 50: XHTML/HTMLファイル修正回数
+
+const AOZORA_CSV_ZIP_URL =
+  'https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip';
+const AOZORA_CSV_ZIP_PROXY =
+  `https://api.allorigins.win/raw?url=${encodeURIComponent(AOZORA_CSV_ZIP_URL)}`;
 
 interface AozoraBook {
   title: string;
   author: string;
-  book_id: string;    // e.g. "000773"
-  author_id: string;  // e.g. "000148"
   card_url: string;
+  xhtml_url?: string;
+  zip_url?: string;
 }
 
-const aozoraQueryEl  = document.querySelector<HTMLInputElement>('#aozoraQuery')!;
+// 1ヘッダー行 + データ行のCSVを行ごとにパース
+// RFC 4180 準拠の最小実装（ダブルクォート囲み対応）
+function parseCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let cur = '';
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuote) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQuote = false; }
+      else { cur += ch; }
+    } else {
+      if (ch === '"') { inQuote = true; }
+      else if (ch === ',') { result.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+type CsvRow = string[];
+let csvCache: CsvRow[] | null = null;
+let csvLoadPromise: Promise<CsvRow[]> | null = null;
+
+async function loadAozoraIndex(
+  onProgress?: (msg: string) => void,
+): Promise<CsvRow[]> {
+  if (csvCache) return csvCache;
+  if (csvLoadPromise) return csvLoadPromise;
+
+  csvLoadPromise = (async () => {
+    const { unzipSync } = await import('fflate');
+
+    onProgress?.('青空文庫インデックスをダウンロード中... (初回のみ、約3MB)');
+
+    // まず直接、ダメなら allorigins プロキシ経由
+    let buf: ArrayBuffer | null = null;
+    try {
+      const res = await fetch(AOZORA_CSV_ZIP_URL);
+      if (res.ok) buf = await res.arrayBuffer();
+    } catch { /* CORS NG → fall through */ }
+
+    if (!buf) {
+      const res = await fetch(AOZORA_CSV_ZIP_PROXY);
+      if (!res.ok) throw new Error(`インデックス取得失敗: HTTP ${res.status}`);
+      buf = await res.arrayBuffer();
+    }
+
+    onProgress?.('インデックスを解析中...');
+    const entries = unzipSync(new Uint8Array(buf));
+    const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
+    if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
+
+    const text = new TextDecoder('utf-8').decode(entries[csvKey]);
+    const lines = text.split(/\r?\n/);
+    // 1行目はヘッダー行なのでスキップ
+    const rows: CsvRow[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line) rows.push(parseCsvLine(line));
+    }
+    csvCache = rows;
+    return rows;
+  })();
+
+  return csvLoadPromise;
+}
+
+function searchFromCsv(rows: CsvRow[], query: string, limit = 20): AozoraBook[] {
+  const q = query.toLowerCase();
+  const results: AozoraBook[] = [];
+  for (const cols of rows) {
+    if (results.length >= limit) break;
+    const title  = cols[0]  ?? '';
+    const sei    = cols[15] ?? '';
+    const mei    = cols[16] ?? '';
+    const author = `${sei}${mei}` || (cols[14] ?? '');
+    const cardUrl = cols[12] ?? '';
+    const xhtmlUrl = cols[46]?.trim() || '';
+    const textUrl  = cols[41]?.trim() || '';
+
+    if (
+      title.toLowerCase().includes(q) ||
+      author.toLowerCase().includes(q)
+    ) {
+      const book: AozoraBook = { title, author, card_url: cardUrl };
+      if (xhtmlUrl) book.xhtml_url = xhtmlUrl;
+      else if (textUrl) book.zip_url = textUrl;
+      results.push(book);
+    }
+  }
+  return results;
+}
+
+const aozoraQueryEl   = document.querySelector<HTMLInputElement>('#aozoraQuery')!;
 const aozoraSearchBtn = document.querySelector<HTMLButtonElement>('#aozoraSearchBtn')!;
 const aozoraStatusEl  = document.querySelector<HTMLDivElement>('#aozoraStatus')!;
 const aozoraResultsEl = document.querySelector<HTMLDivElement>('#aozoraResults')!;
-const aozoraSelectedEl      = document.querySelector<HTMLDivElement>('#aozoraSelected')!;
+const aozoraSelectedEl       = document.querySelector<HTMLDivElement>('#aozoraSelected')!;
 const aozoraSelectedTitleEl  = document.querySelector<HTMLParagraphElement>('#aozoraSelectedTitle')!;
 const aozoraSelectedAuthorEl = document.querySelector<HTMLParagraphElement>('#aozoraSelectedAuthor')!;
 
@@ -259,105 +409,37 @@ function escHtml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// GitHub Search API でカードファイルを検索し、パスから author_id / book_id を抽出
 async function searchAozora(query: string): Promise<void> {
   setAozoraStatus('検索中...');
   aozoraResultsEl.hidden = true;
   aozoraResultsEl.innerHTML = '';
 
-  // GitHub Search API: search for card HTML files whose path contains the query
-  // Endpoint is public (unauthenticated) but rate-limited to 10 req/min
-  const ghUrl =
-    `https://api.github.com/search/code` +
-    `?q=${encodeURIComponent(query)}+repo:aozorabunko/aozorabunko+path:cards+filename:card&per_page=20`;
-
-  let items: Array<{ name: string; path: string; html_url: string }>;
+  let rows: CsvRow[];
   try {
-    const res = await fetch(ghUrl, {
-      headers: { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-    });
-    if (res.status === 403 || res.status === 429) {
-      throw new Error('GitHub API のレートリミットです。1分待ってから再試行してください。');
-    }
-    if (!res.ok) throw new Error(`GitHub API エラー: HTTP ${res.status}`);
-    const data = await res.json();
-    items = data.items ?? [];
+    rows = await loadAozoraIndex((msg) => setAozoraStatus(msg));
   } catch (e) {
     setAozoraStatus(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
-  if (!items.length) {
+  const books = searchFromCsv(rows, query);
+
+  if (!books.length) {
     setAozoraStatus('検索結果が見つかりませんでした。別のキーワードで試してください。');
     return;
   }
 
-  // path 形式: cards/<author_id>/card<book_id>.html
-  const books: AozoraBook[] = items
-    .map((item) => {
-      const m = item.path.match(/cards\/([0-9]+)\/card([0-9]+)\.html$/);
-      if (!m) return null;
-      const author_id = m[1].padStart(6, '0');
-      const book_id   = m[2].padStart(6, '0');
-      // タイトルはファイル名から抽出できないので記述子のみ表示、詳細はカードページで確認できる
-      const card_url = `https://www.aozora.gr.jp/cards/${author_id}/card${book_id}.html`;
-      return {
-        title: `作品 #${book_id}`,
-        author: `著者 #${author_id}`,
-        book_id,
-        author_id,
-        card_url,
-      } satisfies AozoraBook;
-    })
-    .filter((b): b is AozoraBook => b !== null);
-
-  // カードページの内容を並列取得してタイトル・著者を補完する
-  setAozoraStatus(`${books.length} 件見つかりました。詳細を読み込み中...`);
-  const enriched = await Promise.all(books.map(enrichBookMeta));
-
-  setAozoraStatus(`${enriched.length} 件見つかりました`);
+  setAozoraStatus(`${books.length} 件見つかりました`);
   aozoraResultsEl.hidden = false;
-  aozoraResultsEl.innerHTML = enriched.map((book, i) =>
+  aozoraResultsEl.innerHTML = books.map((book, i) =>
     `<button class="aozora-result-item" type="button" data-idx="${i}">
       <span class="aozora-result-title">${escHtml(book.title)}</span>
       <span class="aozora-result-author">${escHtml(book.author)}</span>
     </button>`
   ).join('');
   aozoraResultsEl.querySelectorAll<HTMLButtonElement>('.aozora-result-item').forEach((btn, i) => {
-    btn.addEventListener('click', () => selectAozoraBook(enriched[i]));
+    btn.addEventListener('click', () => selectAozoraBook(books[i]));
   });
-}
-
-// allorigins 経由でカードページを取得しタイトル・著者・XHTML URL を抽出
-async function enrichBookMeta(book: AozoraBook): Promise<AozoraBook> {
-  try {
-    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(book.card_url)}`;
-    const res = await fetch(proxy);
-    if (!res.ok) return book;
-    const { contents } = await res.json() as { contents: string };
-
-    // タイトル抽出: <title>タイトル 著者名のページ</title>
-    const titleM = contents.match(/<title>([^<]+)<\/title>/i);
-    // 著者抽出: 「著者名」のリンク
-    const authorM = contents.match(/<a[^>]+\/cards\/[0-9]+\/[^>]+>([^<]+)<\/a>/i);
-    // XHTML ファイル URL 抽出 (「テキストファイル(XHTML)」リンク)
-    const xhtmlM = contents.match(/href="([^"]+\.html)"/i);
-    // ZIP URL 抽出 (「テキストファイル(ruby/しおり付きテキスト)」)
-    const zipM = contents.match(/href="([^"]+_ruby_[^"]+\.zip)"/i)
-              ?? contents.match(/href="([^"]+\.zip)"/i);
-
-    return {
-      ...book,
-      title:  titleM  ? titleM[1].replace(/\s*のページ$/, '').trim() : book.title,
-      author: authorM ? authorM[1].trim() : book.author,
-      card_url: book.card_url,
-      // 内部岡用に zip_url を保持するため型を拡張
-      ...(zipM  ? { zip_url:   (zipM[1].startsWith('http') ? zipM[1] : `https://www.aozora.gr.jp${zipM[1]}`) } : {}),
-      ...(xhtmlM ? { xhtml_url: (xhtmlM[1].startsWith('http') ? xhtmlM[1] : `https://www.aozora.gr.jp${xhtmlM[1]}`) } : {}),
-    } as AozoraBook & { zip_url?: string; xhtml_url?: string };
-  } catch {
-    return book;
-  }
 }
 
 function selectAozoraBook(book: AozoraBook) {
@@ -516,9 +598,8 @@ async function convertAozora() {
   terminateWorker();
   convertButton.disabled = true; downloadButton.disabled = true; resultBlob = null;
 
-  const book = selectedAozoraBook as AozoraBook & { xhtml_url?: string; zip_url?: string };
+  const book = selectedAozoraBook;
 
-  // 本文URLの候補を決定: xhtml_url > zip_urlの ZIP を展開してHTMLを取り出す
   if (!book.xhtml_url && !book.zip_url) {
     setStatus('この作品に本文ファイルが見つかりませんでした。', 0);
     convertButton.disabled = false;
@@ -563,12 +644,10 @@ async function convertAozora() {
 
 // allorigins.win 経由でテキスト取得
 async function fetchViaProxy(url: string): Promise<string> {
-  // まず直接試行
   try {
     const res = await fetch(url);
     if (res.ok) return await res.text();
   } catch { /* fall through */ }
-  // allorigins フォールバック
   const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
   const res2 = await fetch(proxy);
   if (!res2.ok) throw new Error(`プロキシ経由でも取得失敗: HTTP ${res2.status}`);
