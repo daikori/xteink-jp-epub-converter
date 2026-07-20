@@ -173,9 +173,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '    <dc:language>ja</dc:language>',
         `    <dc:identifier id="bookid">${bookId}</dc:identifier>`,
         '    <dc:source>青空文庫</dc:source>',
-        '    <meta property="rendition:layout">pre-paginated</meta>',
-        '    <meta property="rendition:orientation">auto</meta>',
-        '    <meta property="rendition:spread">auto</meta>',
+        '    <meta property="rendition:layout">reflowable</meta>',
         coverMetaMeta,
         '  </metadata>',
         '  <manifest>',
@@ -504,7 +502,7 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   let count = 0;
   let text = source;
   text = text.replace(
-    /<p(?:\s[^>]*)?>((\s*<br\s*\/?> \s*)+)<\/p\s*>/gi,
+    /<p(?:\s[^>]*)?>((\ s*<br\s*\/?>\ s*)+)<\/p\s*>/gi,
     () => { count++; return '<p> </p>'; },
   );
   let depth = 0;
