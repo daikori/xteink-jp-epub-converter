@@ -425,9 +425,8 @@ function getBookAuthor(): string {
 /**
  * カバーを Canvas に描画する。
  * レイアウト:
- *   上中央附近: タイトル（大字）
- *   タイトルの直下: 著者名（小字）― author が空の場合は省略
- *   最下部: 「Xteink JP EPUB Converter」（アクセント色）― 常に表示
+ *   上〜中央: タイトル（大字）
+ *   最下部:   著者名（author が空の場合は省略）
  */
 function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
   canvas.width = COVER_W; canvas.height = COVER_H;
@@ -442,32 +441,24 @@ function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: s
   // 左端アクセントバー
   ctx.fillStyle = accent; ctx.fillRect(0, 0, 12, COVER_H);
 
-  // タイトルブロックの垂直中心Y（著者ありなら少し上、なければキャンバス中央）
-  const titleBlockCenterY = author ? COVER_H / 2 - 80 : COVER_H / 2;
-
-  // タイトル
+  // タイトルは上〜中央に配置
   ctx.fillStyle = fg;
   ctx.font = `bold 72px "Hiragino Mincho ProN", "Yu Mincho", serif`;
   ctx.textAlign = 'center';
   const titleLineH = 90;
   const titleLines = wrapTextLines(ctx, title, COVER_W - 120, titleLineH);
   const titleBlockH = titleLines.length * titleLineH;
-  const titleStartY = titleBlockCenterY - titleBlockH / 2 + titleLineH / 2;
+  const titleCenterY = COVER_H * 0.4;
+  const titleStartY = titleCenterY - titleBlockH / 2 + titleLineH / 2;
   titleLines.forEach((l, i) => ctx.fillText(l, COVER_W / 2, titleStartY + i * titleLineH));
 
-  // 著者名（タイトルの少し下、常に表示するフッターとは別枝）
+  // 著者名: 最下部に配置（author が空の場合は省略）
   if (author) {
     ctx.fillStyle = fg;
     ctx.font = `500 44px "Hiragino Mincho ProN", "Yu Mincho", serif`;
     ctx.textAlign = 'center';
-    ctx.fillText(author, COVER_W / 2, titleStartY + titleBlockH + 60);
+    ctx.fillText(author, COVER_W / 2, COVER_H - 80);
   }
-
-  // フッター: 常に「Xteink JP EPUB Converter」を表示
-  ctx.fillStyle = accent;
-  ctx.font = `500 28px Inter, system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.fillText('Xteink JP EPUB Converter', COVER_W / 2, COVER_H - 80);
 }
 
 /** テキストを最大幅で折り返し、行の配列を返す */
