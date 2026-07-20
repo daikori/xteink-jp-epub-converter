@@ -502,7 +502,7 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   let count = 0;
   let text = source;
   text = text.replace(
-    /<p(?:\s[^>]*)?>((\ s*<br\s*\/?>\ s*)+)<\/p\s*>/gi,
+    /<p(?:\s[^>]*)?>(\s*<br\s*\/?\s*>\s*)+<\/p\s*>/gi,
     () => { count++; return '<p> </p>'; },
   );
   let depth = 0;
