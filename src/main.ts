@@ -222,20 +222,6 @@ dropzone.addEventListener('drop', (e) => {
 });
 
 // ── Aozora Bunko search (CSV index) ──────────────────────────
-//
-// ZIP取得優先順位:
-//   1. /aozora_list.zip  (public/ にバンドルされた同梱ファイル、CORS不要)
-//   2. allorigins.win プロキシ経由で青空文庫から直接取得（フォールバック）
-//
-// CSV: list_person_all_extended_utf8.csv (UTF-8 BOM付き)
-//   col 0:  作品ID
-//   col 1:  作品名
-//   col 13: 図書カードURL
-//   col 15: 姓
-//   col 16: 名
-//   col 45: テキストファイルURL
-//   col 50: XHTML/HTMLファイルURL
-
 const AOZORA_CSV_ZIP_BUNDLED = '/aozora_list.zip';
 const AOZORA_CSV_ZIP_URL =
   'https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip';
@@ -436,51 +422,65 @@ function getBookAuthor(): string {
   return '';
 }
 
-// author が空文字列の場合は著者行を描画しない
+/**
+ * カバーを Canvas に描画する。
+ * レイアウト:
+ *   上中央附近: タイトル（大字）
+ *   タイトルの直下: 著者名（小字）― author が空の場合は省略
+ *   最下部: 「Xteink JP EPUB Converter」（アクセント色）― 常に表示
+ */
 function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
   canvas.width = COVER_W; canvas.height = COVER_H;
-  const ctx2d = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d')!;
   const isDark = document.documentElement.dataset.theme === 'dark';
-  const bg = isDark ? '#171614' : '#f7f6f2';
-  const fg = isDark ? '#d2d0cb' : '#28251d';
+  const bg     = isDark ? '#171614' : '#f7f6f2';
+  const fg     = isDark ? '#d2d0cb' : '#28251d';
   const accent = isDark ? '#4f98a3' : '#01696f';
 
-  ctx2d.fillStyle = bg; ctx2d.fillRect(0, 0, COVER_W, COVER_H);
-  ctx2d.fillStyle = accent; ctx2d.fillRect(0, 0, 12, COVER_H);
+  // 背景
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, COVER_W, COVER_H);
+  // 左端アクセントバー
+  ctx.fillStyle = accent; ctx.fillRect(0, 0, 12, COVER_H);
 
-  // タイトル：中央附近に描画。著者名がある場合は少し上にシフト
-  const titleY = author ? COVER_H / 2 - 60 : COVER_H / 2;
-  ctx2d.fillStyle = fg;
-  ctx2d.font = `bold 72px "Hiragino Mincho ProN", "Yu Mincho", serif`;
-  ctx2d.textAlign = 'center';
-  wrapText(ctx2d, title, COVER_W / 2, titleY, COVER_W - 120, 90);
+  // タイトルブロックの垂直中心Y（著者ありなら少し上、なければキャンバス中央）
+  const titleBlockCenterY = author ? COVER_H / 2 - 80 : COVER_H / 2;
 
-  // 著者名描画
+  // タイトル
+  ctx.fillStyle = fg;
+  ctx.font = `bold 72px "Hiragino Mincho ProN", "Yu Mincho", serif`;
+  ctx.textAlign = 'center';
+  const titleLineH = 90;
+  const titleLines = wrapTextLines(ctx, title, COVER_W - 120, titleLineH);
+  const titleBlockH = titleLines.length * titleLineH;
+  const titleStartY = titleBlockCenterY - titleBlockH / 2 + titleLineH / 2;
+  titleLines.forEach((l, i) => ctx.fillText(l, COVER_W / 2, titleStartY + i * titleLineH));
+
+  // 著者名（タイトルの少し下、常に表示するフッターとは別枝）
   if (author) {
-    ctx2d.fillStyle = fg;
-    ctx2d.font = `500 44px "Hiragino Mincho ProN", "Yu Mincho", serif`;
-    ctx2d.textAlign = 'center';
-    ctx2d.fillText(author, COVER_W / 2, titleY + 90 * Math.ceil(title.length / 10) + 80);
+    ctx.fillStyle = fg;
+    ctx.font = `500 44px "Hiragino Mincho ProN", "Yu Mincho", serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(author, COVER_W / 2, titleStartY + titleBlockH + 60);
   }
 
-  // フッター
-  ctx2d.fillStyle = accent;
-  ctx2d.font = `500 28px Inter, system-ui, sans-serif`;
-  ctx2d.textAlign = 'center';
-  ctx2d.fillText('Xteink JP EPUB Converter', COVER_W / 2, COVER_H - 80);
+  // フッター: 常に「Xteink JP EPUB Converter」を表示
+  ctx.fillStyle = accent;
+  ctx.font = `500 28px Inter, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText('Xteink JP EPUB Converter', COVER_W / 2, COVER_H - 80);
 }
 
-function wrapText(ctx2d: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
+/** テキストを最大幅で折り返し、行の配列を返す */
+function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, _lineH: number): string[] {
   const lines: string[] = [];
   let line = '';
   for (const ch of [...text]) {
     const test = line + ch;
-    if (ctx2d.measureText(test).width > maxWidth && line) { lines.push(line); line = ch; }
+    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = ch; }
     else line = test;
   }
   if (line) lines.push(line);
-  const startY = y - (lines.length * lineHeight) / 2 + lineHeight / 2;
-  lines.forEach((l, i) => ctx2d.fillText(l, x, startY + i * lineHeight));
+  return lines;
 }
 
 previewCoverBtn.addEventListener('click', () => {
@@ -583,7 +583,7 @@ async function convertAozora() {
   try {
     if (book.xhtml_url) {
       setStatus('青空文庫からXHTMLを取得中...', 3);
-      xhtmlContent = await fetchTextViaProxyChain(book.xhtml_url);
+      xhtmlContent = await fetchViaProxy(book.xhtml_url);
     } else if (book.zip_url) {
       setStatus('青空文庫からZIPを取得中...', 3);
       xhtmlContent = await fetchHtmlFromZip(book.zip_url);
@@ -615,64 +615,24 @@ async function convertAozora() {
   );
 }
 
-// ── Proxy chain for HTML fetch ──────────────────────────────────
+// ── Proxy fetch ───────────────────────────────────────────────
 //
-// 青空文庫のHTMLはCORS非対応なので、複数のプロキシをチェーンする。
-// 優先順:
-//   1. 直接 fetch（同オリジン・ CDNキャッシュがあれば成功することもあるため一応試みるが通常はCORSエラー）
-//   2. corsproxy.io  → レスポンスをそのままテキストとして返す
-//   3. allorigins /raw → バイナリ山に使うエンドポイントだがテキストもOK
-//   4. allorigins /get → JSONラッパー・ .contentsを取り出す
+// Cloudflare Pages Function (/proxy?url=...) を介して取得する。
+// 同一オリジンのリクエストなので CORS 問題は発生しない。
 
-async function fetchTextViaProxyChain(url: string): Promise<string> {
-  // 1. 直接試み（失敗してもエラーを引かない）
-  try {
-    const res = await fetch(url);
-    if (res.ok) return await res.text();
-  } catch { /* CORS NG → fall through */ }
-
-  // 2. corsproxy.io
-  try {
-    const res = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`);
-    if (res.ok) return await res.text();
-  } catch { /* fall through */ }
-
-  // 3. allorigins /raw
-  try {
-    const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
-    if (res.ok) return await res.text();
-  } catch { /* fall through */ }
-
-  // 4. allorigins /get (最終手段、JSONラッパー)
-  const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
-  if (!res.ok) throw new Error(`すべてのプロキシで取得失敗しました (HTTP ${res.status})`);
-  const data = await res.json() as { contents: string | null };
-  if (!data.contents) throw new Error('プロキシから空のレスポンスが返ってきました');
-  return data.contents;
+async function fetchViaProxy(url: string): Promise<string> {
+  const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
+  const res = await fetch(proxyUrl);
+  if (!res.ok) throw new Error(`プロキシ経由の取得失敗 (HTTP ${res.status})`);
+  return res.text();
 }
 
-// ZIP を展開して .html / .xhtml を取り出す
 async function fetchHtmlFromZip(zipUrl: string): Promise<string> {
   const { unzipSync } = await import('fflate');
-  // ZIPはRAWバイナリなのでプロキシチェーンで取得
-  let buf: ArrayBuffer | null = null;
-
-  // corsproxy.io (raw binary対応)
-  try {
-    const res = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(zipUrl)}`);
-    if (res.ok) buf = await res.arrayBuffer();
-  } catch { /* fall through */ }
-
-  // allorigins /raw
-  if (!buf) {
-    try {
-      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(zipUrl)}`);
-      if (res.ok) buf = await res.arrayBuffer();
-    } catch { /* fall through */ }
-  }
-
-  if (!buf) throw new Error('ZIPの取得に失敗しました');
-
+  const proxyUrl = `/proxy?url=${encodeURIComponent(zipUrl)}`;
+  const res = await fetch(proxyUrl);
+  if (!res.ok) throw new Error(`ZIP取得失敗 (HTTP ${res.status})`);
+  const buf = await res.arrayBuffer();
   const entries = unzipSync(new Uint8Array(buf));
   const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
   if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
