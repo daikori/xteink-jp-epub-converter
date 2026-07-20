@@ -223,11 +223,6 @@ dropzone.addEventListener('drop', (e) => {
 
 // ── Aozora Bunko search (CSV index) ──────────────────────────
 //
-// 青空文庫公式の全作品CSVインデックス（ZIPで配布）をダウンロード・展開し、
-// メモリ上でキャッシュ。作品名・著者名で部分一致検索する。
-// GitHub Search API（/search/code）は2023年以降認証必須（HTTP 401）
-// のため使用しない。
-//
 // ZIP取得優先順位:
 //   1. /aozora_list.zip  (public/ にバンドルされた同梱ファイル、CORS不要)
 //   2. allorigins.win プロキシ経由で青空文庫から直接取得（フォールバック）
@@ -235,59 +230,11 @@ dropzone.addEventListener('drop', (e) => {
 // CSV: list_person_all_extended_utf8.csv (UTF-8 BOM付き)
 //   col 0:  作品ID
 //   col 1:  作品名
-//   col 2:  作品名読み
-//   col 3:  ソート用読み
-//   col 4:  副題
-//   col 5:  副題読み
-//   col 6:  原題
-//   col 7:  初出
-//   col 8:  分類番号
-//   col 9:  文字遣い種別
-//   col 10: 作品著作権フラグ
-//   col 11: 公開日
-//   col 12: 最終更新日
 //   col 13: 図書カードURL
-//   col 14: 人物ID
 //   col 15: 姓
 //   col 16: 名
-//   col 17: 姓読み
-//   col 18: 名読み
-//   col 19: 姓読みソート用
-//   col 20: 名読みソート用
-//   col 21: 姓ローマ字
-//   col 22: 名ローマ字
-//   col 23: 役割フラグ
-//   col 24: 生年月日
-//   col 25: 没年月日
-//   col 26: 人物著作権フラグ
-//   col 27: 底本名1
-//   col 28: 底本出版社名1
-//   col 29: 底本初版発行年1
-//   col 30: 入力に使用した版1
-//   col 31: 校正に使用した版1
-//   col 32: 底本の親本名1
-//   col 33: 底本の親本出版社名1
-//   col 34: 底本の親本初版発行年1
-//   col 35: 底本名2
-//   col 36: 底本出版社名2
-//   col 37: 底本初版発行年2
-//   col 38: 入力に使用した版2
-//   col 39: 校正に使用した版2
-//   col 40: 底本の親本名2
-//   col 41: 底本の親本出版社名2
-//   col 42: 底本の親本初版発行年2
-//   col 43: 入力者
-//   col 44: 校正者
 //   col 45: テキストファイルURL
-//   col 46: テキストファイル最終更新日
-//   col 47: テキストファイル符号化方式
-//   col 48: テキストファイル文字集合
-//   col 49: テキストファイル修正回数
 //   col 50: XHTML/HTMLファイルURL
-//   col 51: XHTML/HTMLファイル最終更新日
-//   col 52: XHTML/HTMLファイル符号化方式
-//   col 53: XHTML/HTMLファイル文字集合
-//   col 54: XHTML/HTMLファイル修正回数
 
 const AOZORA_CSV_ZIP_BUNDLED = '/aozora_list.zip';
 const AOZORA_CSV_ZIP_URL =
@@ -303,8 +250,6 @@ interface AozoraBook {
   zip_url?: string;
 }
 
-// 1ヘッダー行 + データ行のCSVを行ごとにパース
-// RFC 4180 準拠の最小実装（ダブルクォート囲み対応）
 function parseCsvLine(line: string): string[] {
   const result: string[] = [];
   let cur = '';
@@ -340,11 +285,7 @@ async function loadAozoraIndex(
 
     onProgress?.('青空文庫インデックスを読み込み中...');
 
-    // 取得優先順位:
-    //   1. バンドル済み /aozora_list.zip (CORS不要・高速)
-    //   2. allorigins プロキシ経由（フォールバック）
     let buf: ArrayBuffer | null = null;
-
     try {
       const res = await fetch(AOZORA_CSV_ZIP_BUNDLED);
       if (res.ok) buf = await res.arrayBuffer();
@@ -362,12 +303,10 @@ async function loadAozoraIndex(
     const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
     if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
 
-    // UTF-8 BOM (U+FEFF) を除去してからパース
     let text = new TextDecoder('utf-8').decode(entries[csvKey]);
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
 
     const lines = text.split(/\r?\n/);
-    // 1行目はヘッダー行なのでスキップ
     const rows: CsvRow[] = [];
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
@@ -385,18 +324,15 @@ function searchFromCsv(rows: CsvRow[], query: string, limit = 20): AozoraBook[] 
   const results: AozoraBook[] = [];
   for (const cols of rows) {
     if (results.length >= limit) break;
-    const title   = cols[1]  ?? '';   // 作品名
-    const sei     = cols[15] ?? '';   // 姓
-    const mei     = cols[16] ?? '';   // 名
+    const title   = cols[1]  ?? '';
+    const sei     = cols[15] ?? '';
+    const mei     = cols[16] ?? '';
     const author  = `${sei}${mei}` || (cols[14] ?? '');
-    const cardUrl = cols[13] ?? '';   // 図書カードURL
-    const xhtmlUrl = cols[50]?.trim() || '';  // XHTML/HTMLファイルURL
-    const textUrl  = cols[45]?.trim() || '';  // テキストファイルURL
+    const cardUrl = cols[13] ?? '';
+    const xhtmlUrl = cols[50]?.trim() || '';
+    const textUrl  = cols[45]?.trim() || '';
 
-    if (
-      title.toLowerCase().includes(q) ||
-      author.toLowerCase().includes(q)
-    ) {
+    if (title.toLowerCase().includes(q) || author.toLowerCase().includes(q)) {
       const book: AozoraBook = { title, author, card_url: cardUrl };
       if (xhtmlUrl) book.xhtml_url = xhtmlUrl;
       else if (textUrl) book.zip_url = textUrl;
@@ -495,21 +431,42 @@ function getBookTitle(): string {
   return 'タイトル';
 }
 
-function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string): void {
+function getBookAuthor(): string {
+  if (activeTab === 'aozora' && selectedAozoraBook) return selectedAozoraBook.author;
+  return '';
+}
+
+// author が空文字列の場合は著者行を描画しない
+function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
   canvas.width = COVER_W; canvas.height = COVER_H;
   const ctx2d = canvas.getContext('2d')!;
   const isDark = document.documentElement.dataset.theme === 'dark';
   const bg = isDark ? '#171614' : '#f7f6f2';
   const fg = isDark ? '#d2d0cb' : '#28251d';
   const accent = isDark ? '#4f98a3' : '#01696f';
+
   ctx2d.fillStyle = bg; ctx2d.fillRect(0, 0, COVER_W, COVER_H);
   ctx2d.fillStyle = accent; ctx2d.fillRect(0, 0, 12, COVER_H);
+
+  // タイトル：中央附近に描画。著者名がある場合は少し上にシフト
+  const titleY = author ? COVER_H / 2 - 60 : COVER_H / 2;
   ctx2d.fillStyle = fg;
   ctx2d.font = `bold 72px "Hiragino Mincho ProN", "Yu Mincho", serif`;
   ctx2d.textAlign = 'center';
-  wrapText(ctx2d, title, COVER_W / 2, COVER_H / 2, COVER_W - 120, 90);
+  wrapText(ctx2d, title, COVER_W / 2, titleY, COVER_W - 120, 90);
+
+  // 著者名描画
+  if (author) {
+    ctx2d.fillStyle = fg;
+    ctx2d.font = `500 44px "Hiragino Mincho ProN", "Yu Mincho", serif`;
+    ctx2d.textAlign = 'center';
+    ctx2d.fillText(author, COVER_W / 2, titleY + 90 * Math.ceil(title.length / 10) + 80);
+  }
+
+  // フッター
   ctx2d.fillStyle = accent;
-  ctx2d.font = `500 30px Inter, system-ui, sans-serif`;
+  ctx2d.font = `500 28px Inter, system-ui, sans-serif`;
+  ctx2d.textAlign = 'center';
   ctx2d.fillText('Xteink JP EPUB Converter', COVER_W / 2, COVER_H - 80);
 }
 
@@ -527,7 +484,7 @@ function wrapText(ctx2d: CanvasRenderingContext2D, text: string, x: number, y: n
 }
 
 previewCoverBtn.addEventListener('click', () => {
-  renderCoverToCanvas(coverCanvas, getBookTitle());
+  renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
   coverPreviewWrap.hidden = false;
   coverPreviewMeta.textContent = `${COVER_W}×${COVER_H}px`;
 });
@@ -593,7 +550,7 @@ async function convertEpubFile() {
   setStatus('準備中...', 0);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
-    renderCoverToCanvas(coverCanvas, getBookTitle());
+    renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
     await new Promise<void>((r) => setTimeout(r, 0));
     const imgBuffer = await canvasToJpegBuffer(coverCanvas);
     (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
@@ -626,7 +583,7 @@ async function convertAozora() {
   try {
     if (book.xhtml_url) {
       setStatus('青空文庫からXHTMLを取得中...', 3);
-      xhtmlContent = await fetchViaProxy(book.xhtml_url);
+      xhtmlContent = await fetchTextViaProxyChain(book.xhtml_url);
     } else if (book.zip_url) {
       setStatus('青空文庫からZIPを取得中...', 3);
       xhtmlContent = await fetchHtmlFromZip(book.zip_url);
@@ -641,7 +598,7 @@ async function convertAozora() {
   setStatus('EPUB変換中...', 10);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
-    renderCoverToCanvas(coverCanvas, getBookTitle());
+    renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
     await new Promise<void>((r) => setTimeout(r, 0));
     const imgBuffer = await canvasToJpegBuffer(coverCanvas);
     (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
@@ -658,26 +615,64 @@ async function convertAozora() {
   );
 }
 
-// allorigins.win 経由でテキスト取得
-async function fetchViaProxy(url: string): Promise<string> {
+// ── Proxy chain for HTML fetch ──────────────────────────────────
+//
+// 青空文庫のHTMLはCORS非対応なので、複数のプロキシをチェーンする。
+// 優先順:
+//   1. 直接 fetch（同オリジン・ CDNキャッシュがあれば成功することもあるため一応試みるが通常はCORSエラー）
+//   2. corsproxy.io  → レスポンスをそのままテキストとして返す
+//   3. allorigins /raw → バイナリ山に使うエンドポイントだがテキストもOK
+//   4. allorigins /get → JSONラッパー・ .contentsを取り出す
+
+async function fetchTextViaProxyChain(url: string): Promise<string> {
+  // 1. 直接試み（失敗してもエラーを引かない）
   try {
     const res = await fetch(url);
     if (res.ok) return await res.text();
+  } catch { /* CORS NG → fall through */ }
+
+  // 2. corsproxy.io
+  try {
+    const res = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`);
+    if (res.ok) return await res.text();
   } catch { /* fall through */ }
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  const res2 = await fetch(proxy);
-  if (!res2.ok) throw new Error(`プロキシ経由でも取得失敗: HTTP ${res2.status}`);
-  const data = await res2.json() as { contents: string };
-  return data.contents ?? '';
+
+  // 3. allorigins /raw
+  try {
+    const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+    if (res.ok) return await res.text();
+  } catch { /* fall through */ }
+
+  // 4. allorigins /get (最終手段、JSONラッパー)
+  const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
+  if (!res.ok) throw new Error(`すべてのプロキシで取得失敗しました (HTTP ${res.status})`);
+  const data = await res.json() as { contents: string | null };
+  if (!data.contents) throw new Error('プロキシから空のレスポンスが返ってきました');
+  return data.contents;
 }
 
 // ZIP を展開して .html / .xhtml を取り出す
 async function fetchHtmlFromZip(zipUrl: string): Promise<string> {
   const { unzipSync } = await import('fflate');
-  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(zipUrl)}`;
-  const res = await fetch(proxyUrl);
-  if (!res.ok) throw new Error(`ZIP取得失敗: HTTP ${res.status}`);
-  const buf = await res.arrayBuffer();
+  // ZIPはRAWバイナリなのでプロキシチェーンで取得
+  let buf: ArrayBuffer | null = null;
+
+  // corsproxy.io (raw binary対応)
+  try {
+    const res = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(zipUrl)}`);
+    if (res.ok) buf = await res.arrayBuffer();
+  } catch { /* fall through */ }
+
+  // allorigins /raw
+  if (!buf) {
+    try {
+      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(zipUrl)}`);
+      if (res.ok) buf = await res.arrayBuffer();
+    } catch { /* fall through */ }
+  }
+
+  if (!buf) throw new Error('ZIPの取得に失敗しました');
+
   const entries = unzipSync(new Uint8Array(buf));
   const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
   if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
