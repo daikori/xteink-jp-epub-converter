@@ -1,4 +1,5 @@
 import './style.css';
+import { unzipSync } from 'fflate';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
@@ -203,13 +204,48 @@ const fileInput = document.querySelector<HTMLInputElement>('#fileInput')!;
 const dropzone = document.querySelector<HTMLLabelElement>('#dropzone')!;
 const selectedFileEl = document.querySelector<HTMLDivElement>('#selectedFile')!;
 let selectedFile: File | null = null;
+let epubTitle = '';
+let epubAuthor = '';
+
+async function extractMetaFromEpub(file: File): Promise<{ title: string; author: string }> {
+  try {
+    const buf = await file.arrayBuffer();
+    const entries = unzipSync(new Uint8Array(buf));
+
+    const containerBytes = entries['META-INF/container.xml'];
+    if (!containerBytes) return { title: '', author: '' };
+    const containerXml = new TextDecoder().decode(containerBytes);
+    const opfPathMatch = containerXml.match(/full-path=["']([^"']+\.opf)["']/i);
+    if (!opfPathMatch) return { title: '', author: '' };
+
+    const opfBytes = entries[opfPathMatch[1]];
+    if (!opfBytes) return { title: '', author: '' };
+    const opfXml = new TextDecoder().decode(opfBytes);
+
+    const titleMatch = opfXml.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i);
+    const authorMatch = opfXml.match(/<dc:creator[^>]*>([^<]+)<\/dc:creator>/i);
+
+    return {
+      title: titleMatch?.[1]?.trim() ?? '',
+      author: authorMatch?.[1]?.trim() ?? ''
+    };
+  } catch {
+    return { title: '', author: '' };
+  }
+}
 
 function handleFile(file: File) {
   if (!file.name.toLowerCase().endsWith('.epub')) { alert('EPUBファイルを選択してください。'); return; }
   selectedFile = file;
+  epubTitle = '';
+  epubAuthor = '';
   selectedFileEl.hidden = false;
   selectedFileEl.textContent = `選択中: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
   updateConvertButton();
+  extractMetaFromEpub(file).then(({ title, author }) => {
+    epubTitle = title;
+    epubAuthor = author;
+  });
 }
 
 fileInput.addEventListener('change', () => { if (fileInput.files?.[0]) handleFile(fileInput.files[0]); });
@@ -267,7 +303,7 @@ async function loadAozoraIndex(
   if (csvLoadPromise) return csvLoadPromise;
 
   csvLoadPromise = (async () => {
-    const { unzipSync } = await import('fflate');
+    const { unzipSync: uz } = await import('fflate');
 
     onProgress?.('青空文庫インデックスを読み込み中...');
 
@@ -285,7 +321,7 @@ async function loadAozoraIndex(
     }
 
     onProgress?.('インデックスを解析中...');
-    const entries = unzipSync(new Uint8Array(buf));
+    const entries = uz(new Uint8Array(buf));
     const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
     if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
 
@@ -409,75 +445,142 @@ const coverPreviewMeta = document.querySelector<HTMLParagraphElement>('#coverPre
 );
 
 // ── Cover generation ───────────────────────────────────────────
-const COVER_W = 768, COVER_H = 1280;
+type PatternFn = (ctx: CanvasRenderingContext2D, W: number, H: number) => void;
+
+const bgPatterns: PatternFn[] = [
+  (ctx, W, H) => { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); },
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 24) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  },
+  (ctx, W, H) => {
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1;
+    for (let i = -H; i < W + H; i += 28) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + H, H); ctx.stroke(); }
+  },
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    const step = 32;
+    for (let x = step / 2; x < W; x += step)
+      for (let y = step / 2; y < H; y += step) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, Math.PI * 2); ctx.fill(); }
+  },
+  (ctx, W, H) => {
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 1;
+    const step = 32;
+    for (let x = 0; x < W; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  },
+  (ctx, W, H) => {
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
+    ctx.strokeRect(20, 20, W - 40, H - 40);
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1;
+    ctx.strokeRect(28, 28, W - 56, H - 56);
+  },
+];
+
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let current = '';
+  for (const char of text) {
+    const test = current + char;
+    if (ctx.measureText(test).width > maxWidth && current.length > 0) {
+      lines.push(current);
+      current = char;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function drawCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
+  const W = 480, H = 800;
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+
+  const seed = hashString(title || 'untitled');
+  bgPatterns[seed % bgPatterns.length](ctx, W, H);
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(48, 80); ctx.lineTo(W - 48, 80); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(48, H - 110); ctx.lineTo(W - 48, H - 110); ctx.stroke();
+
+  const displayTitle = title || '（タイトルなし）';
+  const maxWidth = W - 96;
+  const FONT_BASE = `'Hiragino Sans', 'Noto Sans JP', 'Yu Gothic', sans-serif`;
+  let fontSize = displayTitle.length <= 10 ? 52 : displayTitle.length <= 20 ? 42 : 34;
+  let lines: string[] = [];
+  while (fontSize >= 22) {
+    ctx.font = `bold ${fontSize}px ${FONT_BASE}`;
+    lines = wrapText(ctx, displayTitle, maxWidth);
+    if (lines.length * fontSize * 1.5 <= H * 0.55) break;
+    fontSize -= 4;
+  }
+
+  const lineHeight = fontSize * 1.5;
+  const totalTextH = lines.length * lineHeight;
+  const titleStartY = H * 0.38 - totalTextH / 2;
+
+  const padX = 32, padY = 16;
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.beginPath();
+  (ctx as CanvasRenderingContext2D & { roundRect: Function }).roundRect(
+    W / 2 - maxWidth / 2 - padX,
+    titleStartY - lineHeight / 2 - padY,
+    maxWidth + padX * 2,
+    totalTextH + padY * 2,
+    8
+  );
+  ctx.fill();
+
+  ctx.fillStyle = '#111111';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${fontSize}px ${FONT_BASE}`;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, W / 2, titleStartY + i * lineHeight);
+  });
+
+  if (author) {
+    ctx.font = `20px ${FONT_BASE}`;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillText(author, W / 2, H - 68);
+  }
+}
 
 function getBookTitle(): string {
   if (activeTab === 'aozora' && selectedAozoraBook) return selectedAozoraBook.title;
-  if (selectedFile) return selectedFile.name.replace(/\.epub$/i, '');
-  return 'タイトル';
+  return epubTitle;
 }
 
 function getBookAuthor(): string {
   if (activeTab === 'aozora' && selectedAozoraBook) return selectedAozoraBook.author;
-  return '';
-}
-
-/**
- * カバーを Canvas に描画する。
- * レイアウト:
- *   上〜中央: タイトル（大字）
- *   最下部:   著者名（author が空の場合は省略）
- */
-function renderCoverToCanvas(canvas: HTMLCanvasElement, title: string, author: string): void {
-  canvas.width = COVER_W; canvas.height = COVER_H;
-  const ctx = canvas.getContext('2d')!;
-  const isDark = document.documentElement.dataset.theme === 'dark';
-  const bg     = isDark ? '#171614' : '#f7f6f2';
-  const fg     = isDark ? '#d2d0cb' : '#28251d';
-  const accent = isDark ? '#4f98a3' : '#01696f';
-
-  // 背景
-  ctx.fillStyle = bg; ctx.fillRect(0, 0, COVER_W, COVER_H);
-  // 左端アクセントバー
-  ctx.fillStyle = accent; ctx.fillRect(0, 0, 12, COVER_H);
-
-  // タイトルは上〜中央に配置
-  ctx.fillStyle = fg;
-  ctx.font = `bold 72px "Hiragino Mincho ProN", "Yu Mincho", serif`;
-  ctx.textAlign = 'center';
-  const titleLineH = 90;
-  const titleLines = wrapTextLines(ctx, title, COVER_W - 120, titleLineH);
-  const titleBlockH = titleLines.length * titleLineH;
-  const titleCenterY = COVER_H * 0.4;
-  const titleStartY = titleCenterY - titleBlockH / 2 + titleLineH / 2;
-  titleLines.forEach((l, i) => ctx.fillText(l, COVER_W / 2, titleStartY + i * titleLineH));
-
-  // 著者名: 最下部に配置（author が空の場合は省略）
-  if (author) {
-    ctx.fillStyle = fg;
-    ctx.font = `500 44px "Hiragino Mincho ProN", "Yu Mincho", serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText(author, COVER_W / 2, COVER_H - 80);
-  }
-}
-
-/** テキストを最大幅で折り返し、行の配列を返す */
-function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, _lineH: number): string[] {
-  const lines: string[] = [];
-  let line = '';
-  for (const ch of [...text]) {
-    const test = line + ch;
-    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = ch; }
-    else line = test;
-  }
-  if (line) lines.push(line);
-  return lines;
+  return epubAuthor;
 }
 
 previewCoverBtn.addEventListener('click', () => {
-  renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
+  const title = getBookTitle();
+  const author = getBookAuthor();
+  drawCoverToCanvas(coverCanvas, title, author);
   coverPreviewWrap.hidden = false;
-  coverPreviewMeta.textContent = `${COVER_W}×${COVER_H}px`;
+  const meta = title ? `「${title}」${author ? ' / ' + author : ''}` : '（タイトル未取得）';
+  coverPreviewMeta.textContent = meta;
 });
 
 // ── Convert button state ───────────────────────────────────────
@@ -541,7 +644,7 @@ async function convertEpubFile() {
   setStatus('準備中...', 0);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
-    renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
+    drawCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
     await new Promise<void>((r) => setTimeout(r, 0));
     const imgBuffer = await canvasToJpegBuffer(coverCanvas);
     (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
@@ -570,7 +673,6 @@ async function convertAozora() {
     return;
   }
 
-  // ArrayBuffer として取得し、Shift_JIS デコードを worker 側に委ねる
   let xhtmlBytes: ArrayBuffer | null = null;
   try {
     if (book.xhtml_url) {
@@ -590,7 +692,7 @@ async function convertAozora() {
   setStatus('EPUB変換中...', 10);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
-    renderCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
+    drawCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
     await new Promise<void>((r) => setTimeout(r, 0));
     const imgBuffer = await canvasToJpegBuffer(coverCanvas);
     (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
@@ -600,7 +702,6 @@ async function convertAozora() {
   worker.onmessage = handleWorkerMessage;
   worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
 
-  // xhtmlBytes を Transferable として渡す（ゼロコピー）
   const transfers: ArrayBuffer[] = [xhtmlBytes];
   if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
   worker.postMessage(
@@ -610,9 +711,6 @@ async function convertAozora() {
 }
 
 // ── Proxy fetch（ArrayBuffer 版）──────────────────────────────
-// res.text() は UTF-8 固定で読んでしまい Shift_JIS が化けるため、
-// ArrayBuffer で受け取り worker 側の decodeBytes() で正しくデコードする。
-
 async function fetchBytesViaProxy(url: string): Promise<ArrayBuffer> {
   const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
   const res = await fetch(proxyUrl);
@@ -621,15 +719,14 @@ async function fetchBytesViaProxy(url: string): Promise<ArrayBuffer> {
 }
 
 async function fetchHtmlBytesFromZip(zipUrl: string): Promise<ArrayBuffer> {
-  const { unzipSync } = await import('fflate');
+  const { unzipSync: uz } = await import('fflate');
   const proxyUrl = `/proxy?url=${encodeURIComponent(zipUrl)}`;
   const res = await fetch(proxyUrl);
   if (!res.ok) throw new Error(`ZIP取得失敗 (HTTP ${res.status})`);
   const buf = await res.arrayBuffer();
-  const entries = unzipSync(new Uint8Array(buf));
+  const entries = uz(new Uint8Array(buf));
   const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
   if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
-  // Uint8Array.buffer はビュー全体の backing buffer なので slice してコピーを返す
   const bytes = entries[htmlKey];
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
