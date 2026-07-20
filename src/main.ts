@@ -228,59 +228,68 @@ dropzone.addEventListener('drop', (e) => {
 // GitHub Search API（/search/code）は2023年以降認証必須（HTTP 401）
 // のため使用しない。
 //
-// CSV: list_person_all_extended_utf8.zip
-//   col 0:  作品名
-//   col 1:  作品名読み
-//   col 2:  作品名ソート用読み
-//   col 3:  副題
-//   col 4:  副題読み
-//   col 5:  原題
-//   col 6:  初出
-//   col 7:  分類番号
-//   col 8:  文字遣い種別
-//   col 9:  作品著作権フラグ
-//   col 10: 公開日
-//   col 11: 最終更新日
-//   col 12: 図書カードURL  (https://www.aozora.gr.jp/cards/<author_id>/card<book_id>.html)
-//   col 13: 人物ID
-//   col 14: 著者名
+// ZIP取得優先順位:
+//   1. /aozora_list.zip  (public/ にバンドルされた同梱ファイル、CORS不要)
+//   2. allorigins.win プロキシ経由で青空文庫から直接取得（フォールバック）
+//
+// CSV: list_person_all_extended_utf8.csv (UTF-8 BOM付き)
+//   col 0:  作品ID
+//   col 1:  作品名
+//   col 2:  作品名読み
+//   col 3:  ソート用読み
+//   col 4:  副題
+//   col 5:  副題読み
+//   col 6:  原題
+//   col 7:  初出
+//   col 8:  分類番号
+//   col 9:  文字遣い種別
+//   col 10: 作品著作権フラグ
+//   col 11: 公開日
+//   col 12: 最終更新日
+//   col 13: 図書カードURL
+//   col 14: 人物ID
 //   col 15: 姓
 //   col 16: 名
 //   col 17: 姓読み
 //   col 18: 名読み
-//   col 19: 姓ソート用読み
-//   col 20: 名ソート用読み
-//   col 21: 役割フラグ
-//   col 22: 生年月日
-//   col 23: 没年月日
-//   col 24: 人物著作権フラグ
-//   col 25: 底本名1
-//   col 26: 底本出版社名1
-//   col 27: 底本初版発行年1
-//   col 28: 入力に使用した版1
-//   col 29: 校正に使用した版1
-//   col 30: 底本の親本名1
-//   col 31: 底本の親本出版社名1
-//   col 32: 底本の親本初版発行年1
-//   col 33: 底本名2
-//   col 34: 底本出版社名2
-//   col 35: 底本初版発行年2
-//   col 36: 入力に使用した版2
-//   col 37: 校正に使用した版2
-//   col 38: 底本の親本名2
-//   col 39: 底本の親本出版社名2
-//   col 40: 底本の親本初版発行年2
-//   col 41: テキストファイルURL
-//   col 42: テキストファイル最終更新日
-//   col 43: テキストファイル符号化方式
-//   col 44: テキストファイル文字集合
-//   col 45: テキストファイル修正回数
-//   col 46: XHTML/HTMLファイルURL
-//   col 47: XHTML/HTMLファイル最終更新日
-//   col 48: XHTML/HTMLファイル符号化方式
-//   col 49: XHTML/HTMLファイル文字集合
-//   col 50: XHTML/HTMLファイル修正回数
+//   col 19: 姓読みソート用
+//   col 20: 名読みソート用
+//   col 21: 姓ローマ字
+//   col 22: 名ローマ字
+//   col 23: 役割フラグ
+//   col 24: 生年月日
+//   col 25: 没年月日
+//   col 26: 人物著作権フラグ
+//   col 27: 底本名1
+//   col 28: 底本出版社名1
+//   col 29: 底本初版発行年1
+//   col 30: 入力に使用した版1
+//   col 31: 校正に使用した版1
+//   col 32: 底本の親本名1
+//   col 33: 底本の親本出版社名1
+//   col 34: 底本の親本初版発行年1
+//   col 35: 底本名2
+//   col 36: 底本出版社名2
+//   col 37: 底本初版発行年2
+//   col 38: 入力に使用した版2
+//   col 39: 校正に使用した版2
+//   col 40: 底本の親本名2
+//   col 41: 底本の親本出版社名2
+//   col 42: 底本の親本初版発行年2
+//   col 43: 入力者
+//   col 44: 校正者
+//   col 45: テキストファイルURL
+//   col 46: テキストファイル最終更新日
+//   col 47: テキストファイル符号化方式
+//   col 48: テキストファイル文字集合
+//   col 49: テキストファイル修正回数
+//   col 50: XHTML/HTMLファイルURL
+//   col 51: XHTML/HTMLファイル最終更新日
+//   col 52: XHTML/HTMLファイル符号化方式
+//   col 53: XHTML/HTMLファイル文字集合
+//   col 54: XHTML/HTMLファイル修正回数
 
+const AOZORA_CSV_ZIP_BUNDLED = '/aozora_list.zip';
 const AOZORA_CSV_ZIP_URL =
   'https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip';
 const AOZORA_CSV_ZIP_PROXY =
@@ -329,16 +338,20 @@ async function loadAozoraIndex(
   csvLoadPromise = (async () => {
     const { unzipSync } = await import('fflate');
 
-    onProgress?.('青空文庫インデックスをダウンロード中... (初回のみ、約3MB)');
+    onProgress?.('青空文庫インデックスを読み込み中...');
 
-    // まず直接、ダメなら allorigins プロキシ経由
+    // 取得優先順位:
+    //   1. バンドル済み /aozora_list.zip (CORS不要・高速)
+    //   2. allorigins プロキシ経由（フォールバック）
     let buf: ArrayBuffer | null = null;
+
     try {
-      const res = await fetch(AOZORA_CSV_ZIP_URL);
+      const res = await fetch(AOZORA_CSV_ZIP_BUNDLED);
       if (res.ok) buf = await res.arrayBuffer();
-    } catch { /* CORS NG → fall through */ }
+    } catch { /* fall through */ }
 
     if (!buf) {
+      onProgress?.('バンドル版の読み込みに失敗しました。外部から取得中... (約3MB)');
       const res = await fetch(AOZORA_CSV_ZIP_PROXY);
       if (!res.ok) throw new Error(`インデックス取得失敗: HTTP ${res.status}`);
       buf = await res.arrayBuffer();
@@ -349,7 +362,10 @@ async function loadAozoraIndex(
     const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
     if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
 
-    const text = new TextDecoder('utf-8').decode(entries[csvKey]);
+    // UTF-8 BOM (U+FEFF) を除去してからパース
+    let text = new TextDecoder('utf-8').decode(entries[csvKey]);
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
     const lines = text.split(/\r?\n/);
     // 1行目はヘッダー行なのでスキップ
     const rows: CsvRow[] = [];
@@ -369,13 +385,13 @@ function searchFromCsv(rows: CsvRow[], query: string, limit = 20): AozoraBook[] 
   const results: AozoraBook[] = [];
   for (const cols of rows) {
     if (results.length >= limit) break;
-    const title  = cols[0]  ?? '';
-    const sei    = cols[15] ?? '';
-    const mei    = cols[16] ?? '';
-    const author = `${sei}${mei}` || (cols[14] ?? '');
-    const cardUrl = cols[12] ?? '';
-    const xhtmlUrl = cols[46]?.trim() || '';
-    const textUrl  = cols[41]?.trim() || '';
+    const title   = cols[1]  ?? '';   // 作品名
+    const sei     = cols[15] ?? '';   // 姓
+    const mei     = cols[16] ?? '';   // 名
+    const author  = `${sei}${mei}` || (cols[14] ?? '');
+    const cardUrl = cols[13] ?? '';   // 図書カードURL
+    const xhtmlUrl = cols[50]?.trim() || '';  // XHTML/HTMLファイルURL
+    const textUrl  = cols[45]?.trim() || '';  // テキストファイルURL
 
     if (
       title.toLowerCase().includes(q) ||
