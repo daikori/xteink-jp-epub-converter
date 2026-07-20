@@ -69,7 +69,7 @@ app.innerHTML = `
           <div class="aozora-search">
             <div class="aozora-search-row">
               <input id="aozoraQuery" type="search"
-                placeholder="作品名・著者名で検索（例：坤っちゃん、夏目漱石）"
+                placeholder="作品名・著者名で検索（例：坊っちゃん、夏目漱石）"
                 class="aozora-input" />
               <button id="aozoraSearchBtn" type="button" class="btn btn-secondary">検索</button>
             </div>
@@ -221,72 +221,150 @@ dropzone.addEventListener('drop', (e) => {
   if (e.dataTransfer?.files[0]) handleFile(e.dataTransfer.files[0]);
 });
 
-// ── Aozora Bunko search ───────────────────────────────────────
+// ── Aozora Bunko search (GitHub Contents API) ────────────────────
+//
+// aozorabunko/aozorabunko リポジトリのカードHTMLファイルを
+// GitHub Search API でファイル名検索し、作品の book_id を導出。
+// XHTML 本文 URL は
+//   https://www.aozora.gr.jp/cards/<author_id>/files/<book_id>_ruby_<hash>.html
+// の形式だが hash が不明なので、カードページ
+//   https://www.aozora.gr.jp/cards/<author_id>/card<book_id>.html
+// から ZIP リンクをスクレイピングして取得する。
+// スクレイピングは CORS のため allorigins.win プロキシ経由。
+
 interface AozoraBook {
   title: string;
-  authors: Array<{ last_name: string; first_name: string }>;
-  book_id: number;
-  xhtml_url?: string;
-  html_url?: string;
+  author: string;
+  book_id: string;    // e.g. "000773"
+  author_id: string;  // e.g. "000148"
+  card_url: string;
 }
-interface AozoraSearchResult { hits: number; books: AozoraBook[]; }
 
-const aozoraQueryEl = document.querySelector<HTMLInputElement>('#aozoraQuery')!;
+const aozoraQueryEl  = document.querySelector<HTMLInputElement>('#aozoraQuery')!;
 const aozoraSearchBtn = document.querySelector<HTMLButtonElement>('#aozoraSearchBtn')!;
-const aozoraStatusEl = document.querySelector<HTMLDivElement>('#aozoraStatus')!;
+const aozoraStatusEl  = document.querySelector<HTMLDivElement>('#aozoraStatus')!;
 const aozoraResultsEl = document.querySelector<HTMLDivElement>('#aozoraResults')!;
-const aozoraSelectedEl = document.querySelector<HTMLDivElement>('#aozoraSelected')!;
-const aozoraSelectedTitleEl = document.querySelector<HTMLParagraphElement>('#aozoraSelectedTitle')!;
+const aozoraSelectedEl      = document.querySelector<HTMLDivElement>('#aozoraSelected')!;
+const aozoraSelectedTitleEl  = document.querySelector<HTMLParagraphElement>('#aozoraSelectedTitle')!;
 const aozoraSelectedAuthorEl = document.querySelector<HTMLParagraphElement>('#aozoraSelectedAuthor')!;
 
 let selectedAozoraBook: AozoraBook | null = null;
-let selectedAozoraAuthor = '';
 
 function setAozoraStatus(msg: string, show = true) {
   aozoraStatusEl.textContent = msg;
   aozoraStatusEl.hidden = !show;
 }
 
-function formatAuthor(book: AozoraBook): string {
-  if (!book.authors?.length) return '著者不明';
-  return book.authors.map((a) => `${a.last_name}${a.first_name}`).join('、');
-}
-
 function escHtml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-async function searchAozora(query: string) {
+// GitHub Search API でカードファイルを検索し、パスから author_id / book_id を抽出
+async function searchAozora(query: string): Promise<void> {
   setAozoraStatus('検索中...');
   aozoraResultsEl.hidden = true;
   aozoraResultsEl.innerHTML = '';
+
+  // GitHub Search API: search for card HTML files whose path contains the query
+  // Endpoint is public (unauthenticated) but rate-limited to 10 req/min
+  const ghUrl =
+    `https://api.github.com/search/code` +
+    `?q=${encodeURIComponent(query)}+repo:aozorabunko/aozorabunko+path:cards+filename:card&per_page=20`;
+
+  let items: Array<{ name: string; path: string; html_url: string }>;
   try {
-    const res = await fetch(`https://pubapi.aozora.gr.jp/search.php?title=${encodeURIComponent(query)}&limit=20`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data: AozoraSearchResult = await res.json();
-    if (!data.books?.length) { setAozoraStatus('検索結果が見つかりませんでした。別のキーワードで試してください。'); return; }
-    setAozoraStatus(`${data.hits ?? data.books.length} 件見つかりました`);
-    aozoraResultsEl.hidden = false;
-    aozoraResultsEl.innerHTML = data.books.map((book) =>
-      `<button class="aozora-result-item" type="button" data-book-id="${book.book_id}">
-        <span class="aozora-result-title">${escHtml(book.title)}</span>
-        <span class="aozora-result-author">${escHtml(formatAuthor(book))}</span>
-      </button>`
-    ).join('');
-    aozoraResultsEl.querySelectorAll<HTMLButtonElement>('.aozora-result-item').forEach((btn, i) => {
-      btn.addEventListener('click', () => selectAozoraBook(data.books[i]));
+    const res = await fetch(ghUrl, {
+      headers: { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
     });
+    if (res.status === 403 || res.status === 429) {
+      throw new Error('GitHub API のレートリミットです。1分待ってから再試行してください。');
+    }
+    if (!res.ok) throw new Error(`GitHub API エラー: HTTP ${res.status}`);
+    const data = await res.json();
+    items = data.items ?? [];
   } catch (e) {
     setAozoraStatus(`エラー: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
+  if (!items.length) {
+    setAozoraStatus('検索結果が見つかりませんでした。別のキーワードで試してください。');
+    return;
+  }
+
+  // path 形式: cards/<author_id>/card<book_id>.html
+  const books: AozoraBook[] = items
+    .map((item) => {
+      const m = item.path.match(/cards\/([0-9]+)\/card([0-9]+)\.html$/);
+      if (!m) return null;
+      const author_id = m[1].padStart(6, '0');
+      const book_id   = m[2].padStart(6, '0');
+      // タイトルはファイル名から抽出できないので記述子のみ表示、詳細はカードページで確認できる
+      const card_url = `https://www.aozora.gr.jp/cards/${author_id}/card${book_id}.html`;
+      return {
+        title: `作品 #${book_id}`,
+        author: `著者 #${author_id}`,
+        book_id,
+        author_id,
+        card_url,
+      } satisfies AozoraBook;
+    })
+    .filter((b): b is AozoraBook => b !== null);
+
+  // カードページの内容を並列取得してタイトル・著者を補完する
+  setAozoraStatus(`${books.length} 件見つかりました。詳細を読み込み中...`);
+  const enriched = await Promise.all(books.map(enrichBookMeta));
+
+  setAozoraStatus(`${enriched.length} 件見つかりました`);
+  aozoraResultsEl.hidden = false;
+  aozoraResultsEl.innerHTML = enriched.map((book, i) =>
+    `<button class="aozora-result-item" type="button" data-idx="${i}">
+      <span class="aozora-result-title">${escHtml(book.title)}</span>
+      <span class="aozora-result-author">${escHtml(book.author)}</span>
+    </button>`
+  ).join('');
+  aozoraResultsEl.querySelectorAll<HTMLButtonElement>('.aozora-result-item').forEach((btn, i) => {
+    btn.addEventListener('click', () => selectAozoraBook(enriched[i]));
+  });
+}
+
+// allorigins 経由でカードページを取得しタイトル・著者・XHTML URL を抽出
+async function enrichBookMeta(book: AozoraBook): Promise<AozoraBook> {
+  try {
+    const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(book.card_url)}`;
+    const res = await fetch(proxy);
+    if (!res.ok) return book;
+    const { contents } = await res.json() as { contents: string };
+
+    // タイトル抽出: <title>タイトル 著者名のページ</title>
+    const titleM = contents.match(/<title>([^<]+)<\/title>/i);
+    // 著者抽出: 「著者名」のリンク
+    const authorM = contents.match(/<a[^>]+\/cards\/[0-9]+\/[^>]+>([^<]+)<\/a>/i);
+    // XHTML ファイル URL 抽出 (「テキストファイル(XHTML)」リンク)
+    const xhtmlM = contents.match(/href="([^"]+\.html)"/i);
+    // ZIP URL 抽出 (「テキストファイル(ruby/しおり付きテキスト)」)
+    const zipM = contents.match(/href="([^"]+_ruby_[^"]+\.zip)"/i)
+              ?? contents.match(/href="([^"]+\.zip)"/i);
+
+    return {
+      ...book,
+      title:  titleM  ? titleM[1].replace(/\s*のページ$/, '').trim() : book.title,
+      author: authorM ? authorM[1].trim() : book.author,
+      card_url: book.card_url,
+      // 内部岡用に zip_url を保持するため型を拡張
+      ...(zipM  ? { zip_url:   (zipM[1].startsWith('http') ? zipM[1] : `https://www.aozora.gr.jp${zipM[1]}`) } : {}),
+      ...(xhtmlM ? { xhtml_url: (xhtmlM[1].startsWith('http') ? xhtmlM[1] : `https://www.aozora.gr.jp${xhtmlM[1]}`) } : {}),
+    } as AozoraBook & { zip_url?: string; xhtml_url?: string };
+  } catch {
+    return book;
   }
 }
 
 function selectAozoraBook(book: AozoraBook) {
   selectedAozoraBook = book;
-  selectedAozoraAuthor = formatAuthor(book);
   aozoraSelectedEl.hidden = false;
   aozoraSelectedTitleEl.textContent = book.title;
-  aozoraSelectedAuthorEl.textContent = selectedAozoraAuthor;
+  aozoraSelectedAuthorEl.textContent = book.author;
   setAozoraStatus('作品を選択しました。「変換する」ボタンを押してください。');
   updateConvertButton();
 }
@@ -357,11 +435,11 @@ previewCoverBtn.addEventListener('click', () => {
 });
 
 // ── Convert button state ───────────────────────────────────────
-const convertButton = document.querySelector<HTMLButtonElement>('#convertButton')!;
+const convertButton  = document.querySelector<HTMLButtonElement>('#convertButton')!;
 const downloadButton = document.querySelector<HTMLButtonElement>('#downloadButton')!;
-const statusText = document.querySelector<HTMLSpanElement>('#statusText')!;
+const statusText     = document.querySelector<HTMLSpanElement>('#statusText')!;
 const progressPercent = document.querySelector<HTMLSpanElement>('#progressPercent')!;
-const progressFill = document.querySelector<HTMLDivElement>('#progressFill')!;
+const progressFill   = document.querySelector<HTMLDivElement>('#progressFill')!;
 
 function setStatus(msg: string, pct?: number) {
   statusText.textContent = msg;
@@ -437,46 +515,78 @@ async function convertAozora() {
   if (!selectedAozoraBook) return;
   terminateWorker();
   convertButton.disabled = true; downloadButton.disabled = true; resultBlob = null;
-  setStatus('青空文庫からXHTMLを取得中...', 2);
-  const book = selectedAozoraBook;
-  try {
-    const xhtmlUrl = book.xhtml_url || book.html_url;
-    if (!xhtmlUrl) { setStatus('この作品にHTML/XHTMLファイルが見つかりませんでした。', 0); convertButton.disabled = false; return; }
-    let xhtmlContent = '';
-    try {
-      const res = await fetch(xhtmlUrl);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      xhtmlContent = await res.text();
-    } catch {
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(xhtmlUrl)}`;
-      const res2 = await fetch(proxyUrl);
-      if (!res2.ok) throw new Error(`プロキシ経由でも取得できませんでした: HTTP ${res2.status}`);
-      const data = await res2.json();
-      xhtmlContent = data.contents ?? '';
-    }
-    if (!xhtmlContent) throw new Error('コンテンツが空でした');
-    setStatus('EPUB変換中...', 10);
-    const options = buildOptions();
-    if (coverGenerateRadio.checked) {
-      renderCoverToCanvas(coverCanvas, getBookTitle());
-      await new Promise<void>((r) => setTimeout(r, 0));
-      const imgBuffer = await canvasToJpegBuffer(coverCanvas);
-      (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
-    }
-    const worker = buildWorker();
-    currentWorker = worker;
-    worker.onmessage = handleWorkerMessage;
-    worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
-    const transfers: ArrayBuffer[] = [];
-    if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
-    worker.postMessage(
-      { type: 'build_aozora', payload: { xhtmlContent, title: book.title, author: selectedAozoraAuthor, options } },
-      transfers
-    );
-  } catch (e) {
-    setStatus(`エラー: ${e instanceof Error ? e.message : String(e)}`, 0);
+
+  const book = selectedAozoraBook as AozoraBook & { xhtml_url?: string; zip_url?: string };
+
+  // 本文URLの候補を決定: xhtml_url > zip_urlの ZIP を展開してHTMLを取り出す
+  if (!book.xhtml_url && !book.zip_url) {
+    setStatus('この作品に本文ファイルが見つかりませんでした。', 0);
     convertButton.disabled = false;
+    return;
   }
+
+  let xhtmlContent = '';
+  try {
+    if (book.xhtml_url) {
+      setStatus('青空文庫からXHTMLを取得中...', 3);
+      xhtmlContent = await fetchViaProxy(book.xhtml_url);
+    } else if (book.zip_url) {
+      setStatus('青空文庫からZIPを取得中...', 3);
+      xhtmlContent = await fetchHtmlFromZip(book.zip_url);
+    }
+    if (!xhtmlContent) throw new Error('本文コンテンツが空でした');
+  } catch (e) {
+    setStatus(`取得エラー: ${e instanceof Error ? e.message : String(e)}`, 0);
+    convertButton.disabled = false;
+    return;
+  }
+
+  setStatus('EPUB変換中...', 10);
+  const options = buildOptions();
+  if (coverGenerateRadio.checked) {
+    renderCoverToCanvas(coverCanvas, getBookTitle());
+    await new Promise<void>((r) => setTimeout(r, 0));
+    const imgBuffer = await canvasToJpegBuffer(coverCanvas);
+    (options.cover as { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string }).imageBuffer = imgBuffer;
+  }
+  const worker = buildWorker();
+  currentWorker = worker;
+  worker.onmessage = handleWorkerMessage;
+  worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
+  const transfers: ArrayBuffer[] = [];
+  if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
+  worker.postMessage(
+    { type: 'build_aozora', payload: { xhtmlContent, title: book.title, author: book.author, options } },
+    transfers
+  );
+}
+
+// allorigins.win 経由でテキスト取得
+async function fetchViaProxy(url: string): Promise<string> {
+  // まず直接試行
+  try {
+    const res = await fetch(url);
+    if (res.ok) return await res.text();
+  } catch { /* fall through */ }
+  // allorigins フォールバック
+  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+  const res2 = await fetch(proxy);
+  if (!res2.ok) throw new Error(`プロキシ経由でも取得失敗: HTTP ${res2.status}`);
+  const data = await res2.json() as { contents: string };
+  return data.contents ?? '';
+}
+
+// ZIP を展開して .html / .xhtml を取り出す
+async function fetchHtmlFromZip(zipUrl: string): Promise<string> {
+  const { unzipSync } = await import('fflate');
+  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(zipUrl)}`;
+  const res = await fetch(proxyUrl);
+  if (!res.ok) throw new Error(`ZIP取得失敗: HTTP ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const entries = unzipSync(new Uint8Array(buf));
+  const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
+  if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
+  return new TextDecoder('utf-8').decode(entries[htmlKey]);
 }
 
 // ── Worker message handler ─────────────────────────────────────
@@ -486,11 +596,11 @@ function handleWorkerMessage(event: MessageEvent) {
   if (type === 'done') {
     resultBlob = payload.blob; resultFileName = payload.fileName;
     const s = payload.summary;
-    document.querySelector<HTMLElement>('#statHtml')!.textContent = String(s.htmlFiles);
-    document.querySelector<HTMLElement>('#statRuby')!.textContent = String(s.rubyConversions);
-    document.querySelector<HTMLElement>('#statSpan')!.textContent = String(s.spanInsertions);
-    document.querySelector<HTMLElement>('#statBr')!.textContent = String(s.brConversions);
-    document.querySelector<HTMLElement>('#statWarn')!.textContent = String(s.warnings.length);
+    document.querySelector<HTMLElement>('#statHtml')!.textContent  = String(s.htmlFiles);
+    document.querySelector<HTMLElement>('#statRuby')!.textContent  = String(s.rubyConversions);
+    document.querySelector<HTMLElement>('#statSpan')!.textContent  = String(s.spanInsertions);
+    document.querySelector<HTMLElement>('#statBr')!.textContent    = String(s.brConversions);
+    document.querySelector<HTMLElement>('#statWarn')!.textContent  = String(s.warnings.length);
     const logLines = [...s.logs, ...(s.warnings.length ? ['', '--- 警告 ---', ...s.warnings] : [])];
     document.querySelector<HTMLElement>('#logBox')!.textContent = logLines.join('\n') || '(ログなし)';
     setStatus('完了！ダウンロードボタンを押してください', 100);
