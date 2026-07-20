@@ -23,10 +23,11 @@ type ProcessRequest = {
   };
 };
 
+// xhtmlBytes: ArrayBuffer として受け取ることで Shift_JIS 文字化けを防ぐ
 type BuildAozoraRequest = {
   type: 'build_aozora';
   payload: {
-    xhtmlContent: string;
+    xhtmlBytes: ArrayBuffer;
     title: string;
     author: string;
     options: Options;
@@ -45,10 +46,10 @@ type Summary = {
 const ctx: Worker = self as unknown as Worker;
 
 ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
-  // ── 青空文庫ルート ────────────────────────────────────────────
+  // ── 青空文庫ルート（EPUB 3 縦書き）──────────────────────────────────
   if (event.data.type === 'build_aozora') {
     try {
-      const { xhtmlContent, title, author, options } = event.data.payload;
+      const { xhtmlBytes, title, author, options } = event.data.payload;
       const summary: Summary = {
         htmlFiles: 1,
         rubyConversions: 0,
@@ -58,15 +59,13 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         logs: [],
       };
 
-      // ① 文字コード正規化（fetch で string として受け取っているが念のため確認）
-      //    main.ts 側で res.text() しているので xhtmlContent はすでに JS string。
-      //    ただし青空文庫は Shift_JIS の場合があるため、バイト列から再デコードする
-      //    経路は fetchViaProxy → res.text() で済んでいる。ここでは string を受け取る。
-
-      postProgress(10, 'Xteink向け変換処理中...');
+      // ① Shift_JIS / UTF-8 を正しく判定してデコード
+      postProgress(10, '文字コードを判定・デコード中...');
+      const rawXhtml = decodeBytes(new Uint8Array(xhtmlBytes));
 
       // ② Xteink 向け変換（ルビ・span・br）を直接適用
-      const processed = processMarkup(xhtmlContent, options);
+      postProgress(20, 'Xteink向け変換処理中...');
+      const processed = processMarkup(rawXhtml, options);
       summary.rubyConversions = processed.rubyConversions;
       summary.spanInsertions  = processed.spanInsertions;
       summary.brConversions   = processed.brConversions;
@@ -74,24 +73,25 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         `content.xhtml: ruby=${processed.rubyConversions}, span=${processed.spanInsertions}, br=${processed.brConversions}`,
       );
 
-      // ③ 変換済み XHTML を正規 XHTML 文書に整形
+      // ③ <body> 内だけ抜き出して二重タグを防ぐ
       postProgress(40, 'XHTML を正規化中...');
       const safeTitle  = escapeXml(title  || '無題');
       const safeAuthor = escapeXml(author || '');
       const bookId     = `aozora-${Date.now()}`;
-      const ext        = options.cover.mode === 'generate' ? 'jpg' : null;
+      const hasImage   = options.cover.mode === 'generate';
 
-      // 既に完全な XHTML 文書なら body 部分だけ抜き出す（二重 html タグを防ぐ）
       const bodyContent = extractBodyContent(processed.text);
 
+      // EPUB 3 縦書き content.xhtml
       const contentXhtml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"',
-        '  "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">',
-        '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja">',
+        '<!DOCTYPE html>',
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"',
+        '      xml:lang="ja" lang="ja">',
         '<head>',
-        '  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>',
+        '  <meta charset="UTF-8"/>',
         `  <title>${safeTitle}</title>`,
+        '  <link rel="stylesheet" type="text/css" href="style.css"/>',
         '</head>',
         '<body>',
         bodyContent,
@@ -99,58 +99,95 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</html>',
       ].join('\n');
 
-      // ④ OPF（manifest / spine / guide）を構築
-      //    表紙あり → cover-image item を manifest に追加、guide に reference も追加
-      postProgress(60, 'EPUB メタデータを生成中...');
+      // EPUB 3 必須の nav.xhtml
+      const navXhtml = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE html>',
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"',
+        '      xml:lang="ja" lang="ja">',
+        '<head>',
+        '  <meta charset="UTF-8"/>',
+        `  <title>${safeTitle}</title>`,
+        '</head>',
+        '<body>',
+        '  <nav epub:type="toc" id="toc">',
+        `    <h1>${safeTitle}</h1>`,
+        '    <ol>',
+        `      <li><a href="content.xhtml">${safeTitle}</a></li>`,
+        '    </ol>',
+        '  </nav>',
+        '</body>',
+        '</html>',
+      ].join('\n');
 
-      const coverManifestItem = ext
-        ? `\n    <item id="cover-image" href="Images/cover.${ext}" media-type="image/jpeg" properties="cover-image"/>`
+      // 縦書き CSS
+      const verticalCss = [
+        '@charset "UTF-8";',
+        '',
+        'html {',
+        '  writing-mode: vertical-rl;',
+        '  -webkit-writing-mode: vertical-rl;',
+        '  -epub-writing-mode: vertical-rl;',
+        '}',
+        '',
+        'body {',
+        '  writing-mode: vertical-rl;',
+        '  -webkit-writing-mode: vertical-rl;',
+        '  -epub-writing-mode: vertical-rl;',
+        '  font-family: "ヒラギノ明朝 ProN", "Hiragino Mincho ProN", "游明朝", "YuMincho", serif;',
+        '  font-size: 1em;',
+        '  line-height: 1.8;',
+        '}',
+        '',
+        'p {',
+        '  margin: 0;',
+        '  text-indent: 1em;',
+        '}',
+        '',
+        'h1, h2, h3, h4, h5, h6 {',
+        '  font-weight: bold;',
+        '}',
+      ].join('\n');
+
+      // ④ EPUB 3 OPF 構築
+      //    page-progression-direction="rtl" で右綴じ（日本語縦書き）
+      postProgress(60, 'EPUB 3 メタデータを生成中...');
+
+      const coverManifestItem = hasImage
+        ? '\n    <item id="cover-image" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>'
         : '';
-      const coverGuide = ext
-        ? `\n  <guide>\n    <reference type="cover" title="Cover" href="Images/cover.${ext}"/>\n  </guide>`
+      const coverMetaMeta = hasImage
+        ? '\n    <meta name="cover" content="cover-image"/>'
         : '';
-      const coverMetaMeta = ext
-        ? `\n    <meta name="cover" content="cover-image"/>` : '';
 
       const contentOpf = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">',
-        '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">',
+        '<package xmlns="http://www.idpf.org/2007/opf"',
+        '         xmlns:dc="http://purl.org/dc/elements/1.1/"',
+        '         unique-identifier="bookid" version="3.0"',
+        '         xml:lang="ja"',
+        '         prefix="rendition: http://www.idpf.org/vocab/rendition/#">',
+        '  <metadata>',
         `    <dc:title>${safeTitle}</dc:title>`,
-        `    <dc:creator opf:role="aut">${safeAuthor}</dc:creator>`,
+        `    <dc:creator>${safeAuthor}</dc:creator>`,
         '    <dc:language>ja</dc:language>',
         `    <dc:identifier id="bookid">${bookId}</dc:identifier>`,
         '    <dc:source>青空文庫</dc:source>',
+        '    <meta property="rendition:layout">pre-paginated</meta>',
+        '    <meta property="rendition:orientation">auto</meta>',
+        '    <meta property="rendition:spread">auto</meta>',
         coverMetaMeta,
         '  </metadata>',
         '  <manifest>',
-        '    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+        '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
         '    <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>',
+        '    <item id="css" href="style.css" media-type="text/css"/>',
         coverManifestItem,
         '  </manifest>',
-        '  <spine toc="ncx">',
+        '  <spine page-progression-direction="rtl">',
         '    <itemref idref="content"/>',
         '  </spine>',
-        coverGuide,
         '</package>',
-      ].join('\n');
-
-      const tocNcx = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"',
-        '  "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">',
-        '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">',
-        '  <head>',
-        `    <meta name="dtb:uid" content="${bookId}"/>`,
-        '  </head>',
-        `  <docTitle><text>${safeTitle}</text></docTitle>`,
-        '  <navMap>',
-        '    <navPoint id="navpoint-1" playOrder="1">',
-        `      <navLabel><text>${safeTitle}</text></navLabel>`,
-        '      <content src="content.xhtml"/>',
-        '    </navPoint>',
-        '  </navMap>',
-        '</ncx>',
       ].join('\n');
 
       const containerXml = [
@@ -162,23 +199,23 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</container>',
       ].join('\n');
 
-      // ⑤ EPUB ファイルマップを組み立て（mimetype は必ず level:0）
+      // ⑤ ZIP 組み立て（mimetype は必ず level:0 かつ先頭）
       postProgress(80, 'EPUB を組み立て中...');
 
       const files: Record<string, [Uint8Array, { level: number }]> = {
-        'mimetype':                [strToU8('application/epub+zip'), { level: 0 }],
-        'META-INF/container.xml': [strToU8(containerXml),           { level: 6 }],
-        'OEBPS/content.opf':      [strToU8(contentOpf),             { level: 6 }],
-        'OEBPS/toc.ncx':          [strToU8(tocNcx),                 { level: 6 }],
-        'OEBPS/content.xhtml':    [strToU8(contentXhtml),           { level: 6 }],
+        'mimetype':                 [strToU8('application/epub+zip'), { level: 0 }],
+        'META-INF/container.xml':  [strToU8(containerXml),           { level: 6 }],
+        'OEBPS/content.opf':       [strToU8(contentOpf),             { level: 6 }],
+        'OEBPS/nav.xhtml':         [strToU8(navXhtml),               { level: 6 }],
+        'OEBPS/style.css':         [strToU8(verticalCss),            { level: 6 }],
+        'OEBPS/content.xhtml':     [strToU8(contentXhtml),           { level: 6 }],
       };
 
-      // 表紙画像を追加
-      if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
+      if (hasImage && options.cover.mode === 'generate' && options.cover.imageBuffer) {
         postProgress(88, '表紙画像を組み込み中...');
         files['OEBPS/Images/cover.jpg'] = [
           new Uint8Array(options.cover.imageBuffer),
-          { level: 0 }, // JPEG はすでに圧縮済みなので level:0
+          { level: 0 },
         ];
         summary.logs.push('INFO: 表紙を自動生成して設定しました');
       }
@@ -452,7 +489,7 @@ function convertRubyToParentheses(source: string): { text: string; count: number
         .replace(/<[^>]+>/g, '')
         .trim();
       const rubyText = rtMatch[1].replace(/<[^>]+>/g, '').trim();
-      parts.push(baseText ? `${baseText}（${rubyText}）` : `（${rubyText}）`);
+      parts.push(baseText ? `${baseText}\uff08${rubyText}\uff09` : `\uff08${rubyText}\uff09`);
       cursor = rtMatch.index + rtMatch[0].length;
     }
     const tail = noRp.slice(cursor).replace(/<[^>]+>/g, '').trim();
@@ -486,7 +523,7 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
   const brOnlyP =
-    /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>| )(?:\s|<br\s*\/?>| )*<\/p)(?:\s|<br\s*\/?>| )+<\/p\s*>$/i;
+    /^<p(?:\s[^>]*)?>(?=(?:\s|<br\s*\/?>|\u00a0)(?:\s|<br\s*\/?>|\u00a0)*<\/p)(?:\s|<br\s*\/?>|\u00a0)+<\/p\s*>$/i;
   const text = source.replace(
     /(<p(?:[ \t][^>]*)?>)([\s\S]*?)(<\/p\s*>)/gi,
     (match, openTag, inner, closeTag) => {

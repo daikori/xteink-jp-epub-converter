@@ -570,16 +570,17 @@ async function convertAozora() {
     return;
   }
 
-  let xhtmlContent = '';
+  // ArrayBuffer として取得し、Shift_JIS デコードを worker 側に委ねる
+  let xhtmlBytes: ArrayBuffer | null = null;
   try {
     if (book.xhtml_url) {
       setStatus('青空文庫からXHTMLを取得中...', 3);
-      xhtmlContent = await fetchViaProxy(book.xhtml_url);
+      xhtmlBytes = await fetchBytesViaProxy(book.xhtml_url);
     } else if (book.zip_url) {
       setStatus('青空文庫からZIPを取得中...', 3);
-      xhtmlContent = await fetchHtmlFromZip(book.zip_url);
+      xhtmlBytes = await fetchHtmlBytesFromZip(book.zip_url);
     }
-    if (!xhtmlContent) throw new Error('本文コンテンツが空でした');
+    if (!xhtmlBytes || xhtmlBytes.byteLength === 0) throw new Error('本文コンテンツが空でした');
   } catch (e) {
     setStatus(`取得エラー: ${e instanceof Error ? e.message : String(e)}`, 0);
     convertButton.disabled = false;
@@ -598,27 +599,28 @@ async function convertAozora() {
   currentWorker = worker;
   worker.onmessage = handleWorkerMessage;
   worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
-  const transfers: ArrayBuffer[] = [];
+
+  // xhtmlBytes を Transferable として渡す（ゼロコピー）
+  const transfers: ArrayBuffer[] = [xhtmlBytes];
   if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
   worker.postMessage(
-    { type: 'build_aozora', payload: { xhtmlContent, title: book.title, author: book.author, options } },
-    transfers
+    { type: 'build_aozora', payload: { xhtmlBytes, title: book.title, author: book.author, options } },
+    transfers,
   );
 }
 
-// ── Proxy fetch ───────────────────────────────────────────────
-//
-// Cloudflare Pages Function (/proxy?url=...) を介して取得する。
-// 同一オリジンのリクエストなので CORS 問題は発生しない。
+// ── Proxy fetch（ArrayBuffer 版）──────────────────────────────
+// res.text() は UTF-8 固定で読んでしまい Shift_JIS が化けるため、
+// ArrayBuffer で受け取り worker 側の decodeBytes() で正しくデコードする。
 
-async function fetchViaProxy(url: string): Promise<string> {
+async function fetchBytesViaProxy(url: string): Promise<ArrayBuffer> {
   const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
   const res = await fetch(proxyUrl);
   if (!res.ok) throw new Error(`プロキシ経由の取得失敗 (HTTP ${res.status})`);
-  return res.text();
+  return res.arrayBuffer();
 }
 
-async function fetchHtmlFromZip(zipUrl: string): Promise<string> {
+async function fetchHtmlBytesFromZip(zipUrl: string): Promise<ArrayBuffer> {
   const { unzipSync } = await import('fflate');
   const proxyUrl = `/proxy?url=${encodeURIComponent(zipUrl)}`;
   const res = await fetch(proxyUrl);
@@ -627,7 +629,9 @@ async function fetchHtmlFromZip(zipUrl: string): Promise<string> {
   const entries = unzipSync(new Uint8Array(buf));
   const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
   if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
-  return new TextDecoder('utf-8').decode(entries[htmlKey]);
+  // Uint8Array.buffer はビュー全体の backing buffer なので slice してコピーを返す
+  const bytes = entries[htmlKey];
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
 // ── Worker message handler ─────────────────────────────────────
