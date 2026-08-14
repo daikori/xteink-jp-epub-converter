@@ -7,10 +7,13 @@ type CoverOptions =
   | { mode: 'none' }
   | { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string };
 
+type IndentMode = 'legacy' | 'newFirmware';
+type BrMode = 'legacy' | 'newFirmware';
+
 type Options = {
   convertRuby: boolean;
-  addEmptySpan: boolean;
-  convertBrToEmptyP: boolean;
+  indentMode: IndentMode;
+  brMode: BrMode;
   cover: CoverOptions;
 };
 
@@ -37,7 +40,7 @@ type BuildAozoraRequest = {
 type Summary = {
   htmlFiles: number;
   rubyConversions: number;
-  spanInsertions: number;
+  indentConversions: number;
   brConversions: number;
   warnings: string[];
   logs: string[];
@@ -53,7 +56,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
       const summary: Summary = {
         htmlFiles: 1,
         rubyConversions: 0,
-        spanInsertions: 0,
+        indentConversions: 0,
         brConversions: 0,
         warnings: [],
         logs: [],
@@ -63,14 +66,14 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
       postProgress(10, '文字コードを判定・デコード中...');
       const rawXhtml = decodeBytes(new Uint8Array(xhtmlBytes));
 
-      // ② Xteink 向け変換（ルビ・span・br）を直接適用
+      // ② Xteink 向け変換（ルビ・字下げ・改行）を直接適用
       postProgress(20, 'Xteink向け変換処理中...');
       const processed = processMarkup(rawXhtml, options);
       summary.rubyConversions = processed.rubyConversions;
-      summary.spanInsertions  = processed.spanInsertions;
-      summary.brConversions   = processed.brConversions;
+      summary.indentConversions = processed.indentConversions;
+      summary.brConversions = processed.brConversions;
       summary.logs.push(
-        `content.xhtml: ruby=${processed.rubyConversions}, span=${processed.spanInsertions}, br=${processed.brConversions}`,
+        `content.xhtml: ruby=${processed.rubyConversions}, indent=${processed.indentConversions}, br=${processed.brConversions}`,
       );
 
       // ③ <body> 内だけ抜き出して二重タグを防ぐ
@@ -245,7 +248,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
     const summary: Summary = {
       htmlFiles: 0,
       rubyConversions: 0,
-      spanInsertions: 0,
+      indentConversions: 0,
       brConversions: 0,
       warnings: [],
       logs: [],
@@ -278,25 +281,33 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         const source = decodeBytes(bytes);
         const result = processMarkup(source, options);
         summary.rubyConversions += result.rubyConversions;
-        summary.spanInsertions  += result.spanInsertions;
+        summary.indentConversions += result.indentConversions;
         summary.brConversions   += result.brConversions;
         summary.logs.push(
-          `${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}, br=${result.brConversions}`,
+          `${name}: ruby=${result.rubyConversions}, indent=${result.indentConversions}, br=${result.brConversions}`,
         );
         outputEntries[name] = [strToU8(result.text), { level: 6 }];
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        summary.warnings.push(`WARN: ${name}: ${message}`);
+        summary.warnings.push(`${name}: ${message}`);
         outputEntries[name] = [bytes, { level: 6 }];
       }
     }
 
     if (options.convertRuby && summary.rubyConversions === 0 && summary.htmlFiles > 0)
       summary.logs.push('INFO: ルビタグが見つかりませんでした（元のEPUBにルビがない可能性があります）');
-    if (options.addEmptySpan && summary.spanInsertions === 0 && summary.htmlFiles > 0)
-      summary.logs.push('INFO: <p>タグが見つかりませんでした');
-    if (options.convertBrToEmptyP && summary.brConversions === 0 && summary.htmlFiles > 0)
-      summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
+    if (summary.indentConversions === 0 && summary.htmlFiles > 0)
+      summary.logs.push(
+        options.indentMode === 'legacy'
+          ? 'INFO: <p>タグが見つかりませんでした'
+          : 'INFO: <p>タグが見つからず、セクション結合を行いませんでした',
+      );
+    if (summary.brConversions === 0 && summary.htmlFiles > 0)
+      summary.logs.push(
+        options.brMode === 'legacy'
+          ? 'INFO: pタグ外の<br>タグが見つかりませんでした'
+          : 'INFO: pタグ外の<br>タグが見つからず、<p><br /></p>への変換は発生しませんでした',
+      );
 
     if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
       postProgress(85, '表紙を適用中...');
@@ -456,7 +467,7 @@ function decodeBytes(bytes: Uint8Array): string {
   const metaEnc = probe.match(/<meta[^>]+charset=["']?([\w-]+)["'?]/i);
   const charset = (xmlEnc?.[1] || metaEnc?.[1] || 'utf-8').toLowerCase();
   try {
-    return new TextDecoder(charset, { fatal: true }).decode(bytes);
+    return new TextDecoder(charset, { fatal: false }).decode(bytes);
   } catch {
     return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   }
@@ -464,11 +475,37 @@ function decodeBytes(bytes: Uint8Array): string {
 
 function processMarkup(source: string, options: Options) {
   let text = source;
-  let rubyConversions = 0, spanInsertions = 0, brConversions = 0;
-  if (options.convertRuby)     { const r = convertRubyToParentheses(text); text = r.text; rubyConversions = r.count; }
-  if (options.addEmptySpan)    { const r = addEmptySpanInsideP(text);      text = r.text; spanInsertions  = r.count; }
-  if (options.convertBrToEmptyP) { const r = convertBrToEmptyP(text);     text = r.text; brConversions   = r.count; }
-  return { text, rubyConversions, spanInsertions, brConversions };
+  let rubyConversions = 0;
+  let indentConversions = 0;
+  let brConversions = 0;
+
+  if (options.convertRuby) {
+    const r = convertRubyToParentheses(text);
+    text = r.text;
+    rubyConversions = r.count;
+  }
+
+  if (options.brMode === 'legacy') {
+    const r = convertBrToEmptyP(text);
+    text = r.text;
+    brConversions = r.count;
+  } else {
+    const r = convertBrToDoubleTag(text);
+    text = r.text;
+    brConversions = r.count;
+  }
+
+  if (options.indentMode === 'legacy') {
+    const r = addEmptySpanInsideP(text);
+    text = r.text;
+    indentConversions = r.count;
+  } else {
+    const r = wrapSectionAsSingleP(text);
+    text = r.text;
+    indentConversions = r.count;
+  }
+
+  return { text, rubyConversions, indentConversions, brConversions };
 }
 
 function convertRubyToParentheses(source: string): { text: string; count: number } {
@@ -518,6 +555,52 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   return { text, count };
 }
 
+/**
+ * br タグを <p><br /></p> に変換する（新ファームウェア対応の改行オプション）。
+ * 最新ファームウェアでは p タグ外の br タグに加え、半角スペースのみの
+ * 空 p タグ（<p> </p>）も改行として認識されなくなったため、
+ * br タグ自体を保持した <p><br /></p> の形に変換して端末に改行として
+ * 認識させる。対象は convertBrToEmptyP と同じ2ケース:
+ *
+ * 1. p タグ外に単独で存在する br タグ
+ *      例: <br>  <br/>  <br />
+ * 2. p タグ内に br タグ（と空白文字）しか含まれない場合
+ *      例: <p><br/></p>  <p>  <br />  </p>  <p>\n<br>\n</p>
+ *    ※ p タグ内に br 以外のテキスト・タグが含まれる場合は変換しない
+ *
+ * 対応する書き方: <br>  <br/>  <br />  （大文字 BR も同様）
+ */
+function convertBrToDoubleTag(source: string): { text: string; count: number } {
+  let count = 0;
+  let text = source;
+
+  // --- パス1: pタグ内にbrタグ（と空白文字）しか含まれない場合を変換 ---
+  text = text.replace(
+    /<p(?:\s[^>]*)?>(\s*<br\s*\/?\s*>\s*)+<\/p\s*>/gi,
+    () => {
+      count++;
+      return '<p><br /></p>';
+    }
+  );
+
+  // --- パス2: pタグ外にある brタグを変換 ---
+  let depth = 0;
+  text = text.replace(
+    /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
+    (match, closeP, openP, br) => {
+      if (openP !== undefined) { depth++; return match; }
+      if (closeP !== undefined) { if (depth > 0) depth--; return match; }
+      if (br !== undefined && depth === 0) {
+        count++;
+        return '<p><br /></p>';
+      }
+      return match;
+    }
+  );
+
+  return { text, count };
+}
+
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
   const brOnlyP =
@@ -535,4 +618,52 @@ function addEmptySpanInsideP(source: string): { text: string; count: number } {
     '$1<span></span>',
   );
   return { text: deduped, count };
+}
+
+/**
+ * 文書内の全ての <p>...</p> を検出し、その中身を <br /> で連結して
+ * 単一の <p>...</p> にまとめる（新ファームウェア対応の字下げオプション）。
+ *
+ * 最新ファームウェアの「行頭1字下げ」設定は p タグの先頭にのみ効き、
+ * かつ全ての行頭を無条件に字下げしてしまう（会話文の「」始まりの行頭を
+ * 字下げしないという日本語組版のルールに対応できない）。そこで1セクション
+ * （＝1つのXHTMLファイル）を1つの p タグにまとめることで、端末側の字下げは
+ * セクション先頭の1行にしか効かないようにし、セクション内の各行の字下げは
+ * 元テキストにすでに入っている全角スペースにゆだねる。
+ *
+ * p タグ以外のタグ・テキスト（見出しなど）は変換せず、そのままの位置に残す。
+ * p タグとpタグの間に空白以外の実体（見出しタグなど）がある場合は、そこで
+ * 一旦それまでの p 群をまとめて出力してから、次の p 群を新たにまとめ直す。
+ * これにより、p タグが連続しているだけの通常のセクションは1個の p タグに
+ * まとまる。
+ */
+function wrapSectionAsSingleP(source: string): { text: string; count: number } {
+  const pBlockRegex = /<p(?:[ \t][^>]*)?>([\s\S]*?)<\/p\s*>/gi;
+  let count = 0;
+  let result = '';
+  let cursor = 0;
+  let buffer: string[] = [];
+  let match: RegExpExecArray | null;
+
+  const flush = () => {
+    if (buffer.length === 0) return;
+    result += `<p>${buffer.join('<br />')}<br /></p>`;
+    buffer = [];
+    count++;
+  };
+
+  while ((match = pBlockRegex.exec(source)) !== null) {
+    const gap = source.slice(cursor, match.index);
+    if (gap.trim() !== '') {
+      flush();
+      result += gap;
+    }
+    buffer.push(match[1]);
+    cursor = match.index + match[0].length;
+  }
+
+  flush();
+  result += source.slice(cursor);
+
+  return { text: result, count };
 }
