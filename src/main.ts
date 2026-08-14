@@ -308,7 +308,7 @@ async function loadAozoraIndex(
   csvLoadPromise = (async () => {
     const { unzipSync: uz } = await import('fflate');
 
-    onProgress?.('READING_INDEX');
+    onProgress?.('青空文庫インデックスを読み込み中...');
 
     let buf: ArrayBuffer | null = null;
     try {
@@ -317,16 +317,16 @@ async function loadAozoraIndex(
     } catch { /* fall through */ }
 
     if (!buf) {
-      onProgress?.('FETCH_FALLBACK');
+      onProgress?.('バンドル版の読み込みに失敗しました。外部から取得中... (約3MB)');
       const res = await fetch(AOZORA_CSV_ZIP_PROXY);
-      if (!res.ok) throw new Error(`INDEX_FETCH_ERROR: HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`インデックス取得失敗: HTTP ${res.status}`);
       buf = await res.arrayBuffer();
     }
 
-    onProgress?.('PARSING_INDEX');
+    onProgress?.('インデックスを解析中...');
     const entries = uz(new Uint8Array(buf));
     const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
-    if (!csvKey) throw new Error('CSV_NOT_FOUND');
+    if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
 
     let text = new TextDecoder('utf-8').decode(entries[csvKey]);
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -387,7 +387,7 @@ function escHtml(str: string): string {
 }
 
 async function searchAozora(query: string): Promise<void> {
-  setAozoraStatus('SEARCHING');
+  setAozoraStatus('検索中...');
   aozoraResultsEl.hidden = true;
   aozoraResultsEl.innerHTML = '';
 
@@ -395,18 +395,18 @@ async function searchAozora(query: string): Promise<void> {
   try {
     rows = await loadAozoraIndex((msg) => setAozoraStatus(msg));
   } catch (e) {
-    setAozoraStatus(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
+    setAozoraStatus(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
   const books = searchFromCsv(rows, query);
 
   if (!books.length) {
-    setAozoraStatus('NO_RESULTS');
+    setAozoraStatus('検索結果が見つかりませんでした。別のキーワードで試してください。');
     return;
   }
 
-  setAozoraStatus(`${books.length} FOUND`);
+  setAozoraStatus(`${books.length} 件見つかりました`);
   aozoraResultsEl.hidden = false;
   aozoraResultsEl.innerHTML = books.map((book, i) =>
     `<button class="aozora-result-item" type="button" data-idx="${i}">
@@ -424,7 +424,7 @@ function selectAozoraBook(book: AozoraBook) {
   aozoraSelectedEl.hidden = false;
   aozoraSelectedTitleEl.textContent = book.title;
   aozoraSelectedAuthorEl.textContent = book.author;
-  setAozoraStatus('SELECTED');
+  setAozoraStatus('作品を選択しました。「変換する」ボタンを押してください。');
   updateConvertButton();
 }
 
@@ -621,10 +621,10 @@ function setStatus(msg: string, pct?: number) {
 function updateConvertButton() {
   if (activeTab === 'epub') {
     convertButton.disabled = !selectedFile;
-    if (!selectedFile) setStatus('EPUB_SELECT_PROMPT');
+    if (!selectedFile) setStatus('EPUBを選択してください');
   } else {
     convertButton.disabled = !selectedAozoraBook;
-    if (!selectedAozoraBook) setStatus('AOZORA_SELECT_PROMPT');
+    if (!selectedAozoraBook) setStatus('青空文庫から作品を選択してください');
   }
 }
 
@@ -664,7 +664,7 @@ async function convertEpubFile() {
   if (!selectedFile) return;
   terminateWorker();
   convertButton.disabled = true; downloadButton.disabled = true; resultBlob = null;
-  setStatus('PREPARING', 0);
+  setStatus('準備中...', 0);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
     drawCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
@@ -676,7 +676,7 @@ async function convertEpubFile() {
   const worker = buildWorker();
   currentWorker = worker;
   worker.onmessage = handleWorkerMessage;
-  worker.onerror = (e) => { setStatus(`ERROR: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
+  worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
   const transfers: ArrayBuffer[] = [fileBuffer];
   if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
   worker.postMessage({ type: 'process', payload: { fileName: selectedFile.name, fileBuffer, options } }, transfers);
@@ -690,7 +690,7 @@ async function convertAozora() {
   const book = selectedAozoraBook;
 
   if (!book.xhtml_url && !book.zip_url) {
-    setStatus('NO_CONTENT_FOUND', 0);
+    setStatus('この作品に本文ファイルが見つかりませんでした。', 0);
     convertButton.disabled = false;
     return;
   }
@@ -698,20 +698,20 @@ async function convertAozora() {
   let xhtmlBytes: ArrayBuffer | null = null;
   try {
     if (book.xhtml_url) {
-      setStatus('FETCHING_XHTML', 3);
+      setStatus('青空文庫からXHTMLを取得中...', 3);
       xhtmlBytes = await fetchBytesViaProxy(book.xhtml_url);
     } else if (book.zip_url) {
-      setStatus('FETCHING_ZIP', 3);
+      setStatus('青空文庫からZIPを取得中...', 3);
       xhtmlBytes = await fetchHtmlBytesFromZip(book.zip_url);
     }
-    if (!xhtmlBytes || xhtmlBytes.byteLength === 0) throw new Error('EMPTY_CONTENT');
+    if (!xhtmlBytes || xhtmlBytes.byteLength === 0) throw new Error('本文コンテンツが空でした');
   } catch (e) {
-    setStatus(`FETCH_ERROR: ${e instanceof Error ? e.message : String(e)}`, 0);
+    setStatus(`取得エラー: ${e instanceof Error ? e.message : String(e)}`, 0);
     convertButton.disabled = false;
     return;
   }
 
-  setStatus('CONVERTING', 10);
+  setStatus('EPUB変換中...', 10);
   const options = buildOptions();
   if (coverGenerateRadio.checked) {
     drawCoverToCanvas(coverCanvas, getBookTitle(), getBookAuthor());
@@ -722,7 +722,7 @@ async function convertAozora() {
   const worker = buildWorker();
   currentWorker = worker;
   worker.onmessage = handleWorkerMessage;
-  worker.onerror = (e) => { setStatus(`ERROR: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
+  worker.onerror = (e) => { setStatus(`エラー: ${e.message}`, 0); convertButton.disabled = false; terminateWorker(); };
 
   const transfers: ArrayBuffer[] = [xhtmlBytes];
   if (options.cover.mode === 'generate' && options.cover.imageBuffer) transfers.push(options.cover.imageBuffer);
@@ -735,7 +735,7 @@ async function convertAozora() {
 async function fetchBytesViaProxy(url: string): Promise<ArrayBuffer> {
   const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
   const res = await fetch(proxyUrl);
-  if (!res.ok) throw new Error(`PROXY_FETCH_ERROR: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`プロキシ経由の取得失敗 (HTTP ${res.status})`);
   return res.arrayBuffer();
 }
 
@@ -743,11 +743,11 @@ async function fetchHtmlBytesFromZip(zipUrl: string): Promise<ArrayBuffer> {
   const { unzipSync: uz } = await import('fflate');
   const proxyUrl = `/proxy?url=${encodeURIComponent(zipUrl)}`;
   const res = await fetch(proxyUrl);
-  if (!res.ok) throw new Error(`ZIP_FETCH_ERROR: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`ZIP取得失敗 (HTTP ${res.status})`);
   const buf = await res.arrayBuffer();
   const entries = uz(new Uint8Array(buf));
   const htmlKey = Object.keys(entries).find((k) => /\.(html|xhtml)$/i.test(k));
-  if (!htmlKey) throw new Error('NO_HTML_IN_ZIP');
+  if (!htmlKey) throw new Error('ZIP内にHTML/XHTMLファイルが見つかりませんでした');
   const bytes = entries[htmlKey];
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
@@ -763,13 +763,13 @@ function handleWorkerMessage(event: MessageEvent) {
     document.querySelector<HTMLElement>('#statIndent')!.textContent = String(s.indentConversions);
     document.querySelector<HTMLElement>('#statBr')!.textContent    = String(s.brConversions);
     document.querySelector<HTMLElement>('#statWarn')!.textContent  = String(s.warnings.length);
-    const logLines = [...s.logs, ...(s.warnings.length ? ['', '--- WARN ---', ...s.warnings] : [])];
-    document.querySelector<HTMLElement>('#logBox')!.textContent = logLines.join('\n') || '(no log)';
-    setStatus('DONE', 100);
+    const logLines = [...s.logs, ...(s.warnings.length ? ['', '--- 警告 ---', ...s.warnings] : [])];
+    document.querySelector<HTMLElement>('#logBox')!.textContent = logLines.join('\n') || '(ログなし)';
+    setStatus('完了！ダウンロードボタンを押してください', 100);
     convertButton.disabled = false; downloadButton.disabled = false;
     terminateWorker(); return;
   }
-  if (type === 'error') { setStatus(`ERROR: ${payload.message}`, 0); convertButton.disabled = false; terminateWorker(); }
+  if (type === 'error') { setStatus(`エラー: ${payload.message}`, 0); convertButton.disabled = false; terminateWorker(); }
 }
 
 convertButton.addEventListener('click', () => {
