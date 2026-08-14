@@ -459,6 +459,21 @@ brModeEnable.addEventListener('change', syncBrModeRadios);
 syncIndentModeRadios();
 syncBrModeRadios();
 
+tabBtns.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab as 'epub' | 'aozora';
+    if (tab === 'aozora') {
+      indentModeEnable.checked = false;
+      brModeEnable.checked = false;
+    } else {
+      indentModeEnable.checked = true;
+      brModeEnable.checked = true;
+    }
+    syncIndentModeRadios();
+    syncBrModeRadios();
+  });
+});
+
 function getIndentMode(): 'legacy' | 'newFirmware' {
   const el = document.querySelector<HTMLInputElement>('input[name="indentMode"]:checked');
   return (el?.value as 'legacy' | 'newFirmware') ?? 'legacy';
