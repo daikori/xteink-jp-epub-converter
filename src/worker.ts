@@ -12,7 +12,9 @@ type BrMode = 'legacy' | 'newFirmware';
 
 type Options = {
   convertRuby: boolean;
+  applyIndent: boolean;
   indentMode: IndentMode;
+  applyBr: boolean;
   brMode: BrMode;
   cover: CoverOptions;
 };
@@ -26,7 +28,6 @@ type ProcessRequest = {
   };
 };
 
-// xhtmlBytes: ArrayBuffer として受け取ることで Shift_JIS 文字化けを防ぐ
 type BuildAozoraRequest = {
   type: 'build_aozora';
   payload: {
@@ -49,7 +50,6 @@ type Summary = {
 const ctx: Worker = self as unknown as Worker;
 
 ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
-  // ── 青空文庫ルート（EPUB 3 縦書き）──────────────────────────────────
   if (event.data.type === 'build_aozora') {
     try {
       const { xhtmlBytes, title, author, options } = event.data.payload;
@@ -62,11 +62,9 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         logs: [],
       };
 
-      // ① Shift_JIS / UTF-8 を正しく判定してデコード
       postProgress(10, '文字コードを判定・デコード中...');
       const rawXhtml = decodeBytes(new Uint8Array(xhtmlBytes));
 
-      // ② Xteink 向け変換（ルビ・字下げ・改行）を直接適用
       postProgress(20, 'Xteink向け変換処理中...');
       const processed = processMarkup(rawXhtml, options);
       summary.rubyConversions = processed.rubyConversions;
@@ -76,7 +74,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         `content.xhtml: ruby=${processed.rubyConversions}, indent=${processed.indentConversions}, br=${processed.brConversions}`,
       );
 
-      // ③ <body> 内だけ抜き出して二重タグを防ぐ
       postProgress(40, 'XHTML を正規化中...');
       const safeTitle  = escapeXml(title  || '無題');
       const safeAuthor = escapeXml(author || '');
@@ -85,7 +82,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
 
       const bodyContent = extractBodyContent(processed.text);
 
-      // EPUB 3 縦書き content.xhtml
       const contentXhtml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE html>',
@@ -102,7 +98,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</html>',
       ].join('\n');
 
-      // EPUB 3 必須の nav.xhtml
       const navXhtml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE html>',
@@ -123,7 +118,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</html>',
       ].join('\n');
 
-      // 縦書き CSS
       const verticalCss = [
         '@charset "UTF-8";',
         '',
@@ -152,8 +146,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '}',
       ].join('\n');
 
-      // ④ EPUB 3 OPF 構築
-      //    page-progression-direction="rtl" で右綴じ（日本語縦書き）
       postProgress(60, 'EPUB 3 メタデータを生成中...');
 
       const coverManifestItem = hasImage
@@ -200,7 +192,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</container>',
       ].join('\n');
 
-      // ⑤ ZIP 組み立て（mimetype は必ず level:0 かつ先頭）
       postProgress(80, 'EPUB を組み立て中...');
 
       const files: Record<string, [Uint8Array, { level: number }]> = {
@@ -237,7 +228,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
     return;
   }
 
-  // ── 通常 EPUB 変換ルート ──────────────────────────────────────
   if (event.data.type !== 'process') return;
 
   try {
@@ -296,17 +286,17 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
 
     if (options.convertRuby && summary.rubyConversions === 0 && summary.htmlFiles > 0)
       summary.logs.push('INFO: ルビタグが見つかりませんでした（元のEPUBにルビがない可能性があります）');
-    if (summary.indentConversions === 0 && summary.htmlFiles > 0)
+    if (options.applyIndent && summary.indentConversions === 0 && summary.htmlFiles > 0)
       summary.logs.push(
         options.indentMode === 'legacy'
           ? 'INFO: <p>タグが見つかりませんでした'
           : 'INFO: <p>タグが見つからず、セクション結合を行いませんでした',
       );
-    if (summary.brConversions === 0 && summary.htmlFiles > 0)
+    if (options.applyBr && summary.brConversions === 0 && summary.htmlFiles > 0)
       summary.logs.push(
         options.brMode === 'legacy'
           ? 'INFO: pタグ外の<br>タグが見つかりませんでした'
-          : 'INFO: pタグ外の<br>タグが見つからず、<p><br /></p>への変換は発生しませんでした',
+          : 'INFO: pタグ外の<br>タグが見つからず、<p>　<br /></p>への変換は発生しませんでした',
       );
 
     if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
@@ -356,8 +346,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
   }
 };
 
-// ── ユーティリティ ─────────────────────────────────────────────
-
 function postProgress(progress: number, message: string) {
   ctx.postMessage({ type: 'progress', payload: { progress, message } });
 }
@@ -368,10 +356,6 @@ function buildOutputName(fileName: string) {
     : `${fileName}_x4.epub`;
 }
 
-/**
- * 青空文庫 XHTML から <body> 内のコンテンツだけを抜き出す。
- * 完全な XHTML 文書でない場合はそのまま返す。
- */
 function extractBodyContent(html: string): string {
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   return bodyMatch ? bodyMatch[1].trim() : html.trim();
@@ -485,24 +469,28 @@ function processMarkup(source: string, options: Options) {
     rubyConversions = r.count;
   }
 
-  if (options.brMode === 'legacy') {
-    const r = convertBrToEmptyP(text);
-    text = r.text;
-    brConversions = r.count;
-  } else {
-    const r = convertBrToDoubleTag(text);
-    text = r.text;
-    brConversions = r.count;
+  if (options.applyBr) {
+    if (options.brMode === 'legacy') {
+      const r = convertBrToEmptyP(text);
+      text = r.text;
+      brConversions = r.count;
+    } else {
+      const r = convertBrToDoubleTag(text);
+      text = r.text;
+      brConversions = r.count;
+    }
   }
 
-  if (options.indentMode === 'legacy') {
-    const r = addEmptySpanInsideP(text);
-    text = r.text;
-    indentConversions = r.count;
-  } else {
-    const r = wrapSectionAsSingleP(text);
-    text = r.text;
-    indentConversions = r.count;
+  if (options.applyIndent) {
+    if (options.indentMode === 'legacy') {
+      const r = addEmptySpanInsideP(text);
+      text = r.text;
+      indentConversions = r.count;
+    } else {
+      const r = wrapSectionAsSingleP(text);
+      text = r.text;
+      indentConversions = r.count;
+    }
   }
 
   return { text, rubyConversions, indentConversions, brConversions };
@@ -555,35 +543,18 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   return { text, count };
 }
 
-/**
- * br タグを <p><br /></p> に変換する（新ファームウェア対応の改行オプション）。
- * 最新ファームウェアでは p タグ外の br タグに加え、半角スペースのみの
- * 空 p タグ（<p> </p>）も改行として認識されなくなったため、
- * br タグ自体を保持した <p><br /></p> の形に変換して端末に改行として
- * 認識させる。対象は convertBrToEmptyP と同じ2ケース:
- *
- * 1. p タグ外に単独で存在する br タグ
- *      例: <br>  <br/>  <br />
- * 2. p タグ内に br タグ（と空白文字）しか含まれない場合
- *      例: <p><br/></p>  <p>  <br />  </p>  <p>\n<br>\n</p>
- *    ※ p タグ内に br 以外のテキスト・タグが含まれる場合は変換しない
- *
- * 対応する書き方: <br>  <br/>  <br />  （大文字 BR も同様）
- */
 function convertBrToDoubleTag(source: string): { text: string; count: number } {
   let count = 0;
   let text = source;
 
-  // --- パス1: pタグ内にbrタグ（と空白文字）しか含まれない場合を変換 ---
   text = text.replace(
     /<p(?:\s[^>]*)?>(\s*<br\s*\/?\s*>\s*)+<\/p\s*>/gi,
     () => {
       count++;
-      return '<p><br /></p>';
+      return '<p>\u3000<br /></p>';
     }
   );
 
-  // --- パス2: pタグ外にある brタグを変換 ---
   let depth = 0;
   text = text.replace(
     /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
@@ -592,7 +563,7 @@ function convertBrToDoubleTag(source: string): { text: string; count: number } {
       if (closeP !== undefined) { if (depth > 0) depth--; return match; }
       if (br !== undefined && depth === 0) {
         count++;
-        return '<p><br /></p>';
+        return '<p>\u3000<br /></p>';
       }
       return match;
     }
@@ -620,23 +591,6 @@ function addEmptySpanInsideP(source: string): { text: string; count: number } {
   return { text: deduped, count };
 }
 
-/**
- * 文書内の全ての <p>...</p> を検出し、その中身を <br /> で連結して
- * 単一の <p>...</p> にまとめる（新ファームウェア対応の字下げオプション）。
- *
- * 最新ファームウェアの「行頭1字下げ」設定は p タグの先頭にのみ効き、
- * かつ全ての行頭を無条件に字下げしてしまう（会話文の「」始まりの行頭を
- * 字下げしないという日本語組版のルールに対応できない）。そこで1セクション
- * （＝1つのXHTMLファイル）を1つの p タグにまとめることで、端末側の字下げは
- * セクション先頭の1行にしか効かないようにし、セクション内の各行の字下げは
- * 元テキストにすでに入っている全角スペースにゆだねる。
- *
- * p タグ以外のタグ・テキスト（見出しなど）は変換せず、そのままの位置に残す。
- * p タグとpタグの間に空白以外の実体（見出しタグなど）がある場合は、そこで
- * 一旦それまでの p 群をまとめて出力してから、次の p 群を新たにまとめ直す。
- * これにより、p タグが連続しているだけの通常のセクションは1個の p タグに
- * まとまる。
- */
 function wrapSectionAsSingleP(source: string): { text: string; count: number } {
   const pBlockRegex = /<p(?:[ \t][^>]*)?>([\s\S]*?)<\/p\s*>/gi;
   let count = 0;
