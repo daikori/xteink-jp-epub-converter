@@ -1,29 +1,26 @@
 import './style.css';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync, strToU8 } from 'fflate';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
 
 app.innerHTML = `
-  <a class="skip-link" href="#main">本文へスキップ</a>
   <div class="shell">
+    <a class="skip-link" href="#main">本文へスキプ</a>
     <header class="header">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4">
-            <rect x="8" y="6" width="24" height="36" rx="4"></rect>
-            <path d="M18 14v20M24 14v20"></path>
-            <path d="M36 12v24"></path>
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 4h11a5 5 0 0 1 5 5v11H9a5 5 0 0 1-5-5V4Z" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M8 9h8M8 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
           </svg>
-        </div>
+        </span>
         <div>
-          <p class="eyebrow">Browser-only EPUB tool</p>
+          <p class="eyebrow">Xteink JP EPUB Converter</p>
           <h1>Xteink JP EPUB Converter</h1>
         </div>
       </div>
-      <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
-        <span class="theme-icon">◐</span>
-      </button>
+      <button class="theme-toggle" type="button" data-theme-toggle aria-label="テーラ切り替え">🌓</button>
     </header>
 
     <main id="main" class="main-grid">
@@ -37,6 +34,7 @@ app.innerHTML = `
           <li>空白行を挿入する目的で入れられた改行（ br タグ）を p タグ + 半角スペースに変換して、Xteink 側に改行として認識させます</li>
           <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
           <li>青空文庫から直接作品を検索して変換するタブも利用できます</li>
+          <li>最新ファームウェア（行頭を強制的に1字下げする設定に対応した端末）向けに、1セクションを1つの p タグへまとめる字下げ方式と、&lt;p&gt;&lt;br /&gt;&lt;/p&gt; による改行方式も選択できます</li>
         </ul>
       </section>
 
@@ -86,9 +84,17 @@ app.innerHTML = `
 
         <div class="toggles">
           <label class="toggle"><input id="rubyToggle" type="checkbox" checked />ルビを括弧書きへ変換</label>
-          <label class="toggle"><input id="spanToggle" type="checkbox" checked />p先頭に空spanを追加</label>
-          <label class="toggle"><input id="brToggle" type="checkbox" checked />&lt;br&gt;タグを空白行に変換</label>
         </div>
+        <fieldset class="option-group">
+          <legend>字下げ方式</legend>
+          <label class="toggle"><input type="radio" name="indentMode" value="legacy" checked />従来方式（pタグ先頭に空 spanを追加）</label>
+          <label class="toggle"><input type="radio" name="indentMode" value="newFirmware" />新ファームウェア対応（1セクションを1つのpタグにまとめ、行末に&lt;br /&gt;を追加）</label>
+        </fieldset>
+        <fieldset class="option-group">
+          <legend>改行方式（pタグ外の&lt;br&gt;タグ）</legend>
+          <label class="toggle"><input type="radio" name="brMode" value="legacy" checked />従来方式（&lt;p&gt; &lt;/p&gt; に変換）</label>
+          <label class="toggle"><input type="radio" name="brMode" value="newFirmware" />新ファームウェア対応（&lt;p&gt;&lt;br /&gt;&lt;/p&gt; に変換）</label>
+        </fieldset>
 
         <div class="cover-section">
           <p class="kicker">表紙設定</p>
@@ -115,7 +121,7 @@ app.innerHTML = `
           <button id="convertButton" class="btn btn-primary" type="button" disabled>変換する</button>
           <button id="downloadButton" class="btn btn-secondary" type="button" disabled>ダウンロード</button>
         </div>
-        <div class="progress-block" aria-live="polite">
+        <div class="progress-block">
           <div class="progress-meta">
             <span id="statusText">EPUBを選択してください</span>
             <span id="progressPercent">0%</span>
@@ -132,28 +138,27 @@ app.innerHTML = `
         <div class="stats-grid">
           <article class="stat"><span class="stat-label">HTML/XHTML</span><strong id="statHtml">0</strong></article>
           <article class="stat"><span class="stat-label">Ruby変換</span><strong id="statRuby">0</strong></article>
-          <article class="stat"><span class="stat-label">Span追加</span><strong id="statSpan">0</strong></article>
+          <article class="stat"><span class="stat-label">字下げ処理</span><strong id="statIndent">0</strong></article>
           <article class="stat"><span class="stat-label">br変換</span><strong id="statBr">0</strong></article>
           <article class="stat"><span class="stat-label">警告</span><strong id="statWarn">0</strong></article>
         </div>
         <div class="log-wrap">
-          <h3>ログ</h3>
-          <pre id="logBox">まだ処理をしていません。</pre>
+          <p class="kicker">ログ</p>
+          <pre id="logBox">まだ変換していません。</pre>
         </div>
       </section>
 
       <section class="panel card notes-panel">
         <div class="section-head">
-          <p class="kicker">詳細仕様</p>
-          <h2>このツールについて</h2>
+          <p class="kicker">注意事項</p>
+          <h2>ご利用にあたって</h2>
         </div>
         <ul class="notes" role="list">
-          <li>処理対象は EPUB 内の .xhtml / .html / .htm　となります</li>
           <li>mimetype は先頭かつ無圧縮で再格納するようにしています</li>
-          <li>壊れた文書はスキップし、可能な分だけ継続します</li>
+          <li>壊れた文書はスキプし、可能な分だけ継続します</li>
           <li>ブラウザ内処理なので、サイズの大きい EPUB はブラウザが重くなる場合があります</li>
           <li>青空文庫タブ使用時は、青空文庫の利用規約および著作権法に従ってご利用ください</li>
-          <li>このサイトを利用することに伴ういかなる不利益において、サイト側は一切責任を負いませんのでご注意ください</li>
+          <li>このサイトを利用することに伴ういかなる不利益においても、サイト側は一切責任を負いませんのでご注意ください</li>
           <li>EPUB ファイルを変換するので、EPUB の著作権、著作者人格権（同一性保持権等）、出版権、ライセンス条件その他関連する権利関係は、すべて利用者自身の責任でお願いします</li>
           <li>ソースコードは <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a> で公開しています</li>
         </ul>
@@ -161,12 +166,12 @@ app.innerHTML = `
     </main>
 
     <footer class="footer">
-      <p>© 2026 daikori — <a href="https://github.com/daikori/xteink-jp-epub-converter" target="_blank" rel="noopener noreferrer">GitHub</a></p>
+      <p>Made for Xteink readers.</p>
     </footer>
   </div>
 `;
 
-// ── Theme toggle ──────────────────────────────────────────────
+// ── Theme toggle ──────────────────────────────────
 (function setupTheme() {
   const root = document.documentElement;
   const btn = document.querySelector<HTMLButtonElement>('[data-theme-toggle]')!;
@@ -179,7 +184,7 @@ app.innerHTML = `
   });
 })();
 
-// ── Tab switching ─────────────────────────────────────────────
+// ── Tab switching ──────────────────────────────────
 const tabBtns = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
 const tabPanels = document.querySelectorAll<HTMLElement>('.tab-panel');
 let activeTab: 'epub' | 'aozora' = 'epub';
@@ -199,7 +204,7 @@ tabBtns.forEach((btn) => {
   });
 });
 
-// ── EPUB file handling ────────────────────────────────────────
+// ── EPUB file handling ────────────────────────────────
 const fileInput = document.querySelector<HTMLInputElement>('#fileInput')!;
 const dropzone = document.querySelector<HTMLLabelElement>('#dropzone')!;
 const selectedFileEl = document.querySelector<HTMLDivElement>('#selectedFile')!;
@@ -257,7 +262,7 @@ dropzone.addEventListener('drop', (e) => {
   if (e.dataTransfer?.files[0]) handleFile(e.dataTransfer.files[0]);
 });
 
-// ── Aozora Bunko search (CSV index) ──────────────────────────
+// ── Aozora Bunko search (CSV index) ────────────────────────
 const AOZORA_CSV_ZIP_BUNDLED = '/aozora_list.zip';
 const AOZORA_CSV_ZIP_URL =
   'https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip';
@@ -305,7 +310,7 @@ async function loadAozoraIndex(
   csvLoadPromise = (async () => {
     const { unzipSync: uz } = await import('fflate');
 
-    onProgress?.('青空文庫インデックスを読み込み中...');
+    onProgress?.('青空文庫インデッキスを読み込み中...');
 
     let buf: ArrayBuffer | null = null;
     try {
@@ -316,11 +321,11 @@ async function loadAozoraIndex(
     if (!buf) {
       onProgress?.('バンドル版の読み込みに失敗しました。外部から取得中... (約3MB)');
       const res = await fetch(AOZORA_CSV_ZIP_PROXY);
-      if (!res.ok) throw new Error(`インデックス取得失敗: HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`インデッキス取得失敗: HTTP ${res.status}`);
       buf = await res.arrayBuffer();
     }
 
-    onProgress?.('インデックスを解析中...');
+    onProgress?.('インデッキスを解析中...');
     const entries = uz(new Uint8Array(buf));
     const csvKey = Object.keys(entries).find((k) => k.endsWith('.csv'));
     if (!csvKey) throw new Error('ZIP内にCSVファイルが見つかりませんでした');
@@ -428,10 +433,8 @@ function selectAozoraBook(book: AozoraBook) {
 aozoraSearchBtn.addEventListener('click', () => { const q = aozoraQueryEl.value.trim(); if (q) searchAozora(q); });
 aozoraQueryEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const q = aozoraQueryEl.value.trim(); if (q) searchAozora(q); } });
 
-// ── Options ────────────────────────────────────────────────────
+// ── Options ──────────────────────────────────────
 const rubyToggle = document.querySelector<HTMLInputElement>('#rubyToggle')!;
-const spanToggle = document.querySelector<HTMLInputElement>('#spanToggle')!;
-const brToggle = document.querySelector<HTMLInputElement>('#brToggle')!;
 const coverNoneRadio = document.querySelector<HTMLInputElement>('#coverNone')!;
 const coverGenerateRadio = document.querySelector<HTMLInputElement>('#coverGenerate')!;
 const coverGeneratePanel = document.querySelector<HTMLElement>('#coverGeneratePanel')!;
@@ -444,7 +447,17 @@ const coverPreviewMeta = document.querySelector<HTMLParagraphElement>('#coverPre
   r.addEventListener('change', () => { coverGeneratePanel.hidden = !coverGenerateRadio.checked; })
 );
 
-// ── Cover generation ───────────────────────────────────────────
+function getIndentMode(): 'legacy' | 'newFirmware' {
+  const el = document.querySelector<HTMLInputElement>('input[name="indentMode"]:checked');
+  return (el?.value as 'legacy' | 'newFirmware') ?? 'legacy';
+}
+
+function getBrMode(): 'legacy' | 'newFirmware' {
+  const el = document.querySelector<HTMLInputElement>('input[name="brMode"]:checked');
+  return (el?.value as 'legacy' | 'newFirmware') ?? 'legacy';
+}
+
+// ── Cover generation ───────────────────────────────
 type PatternFn = (ctx: CanvasRenderingContext2D, W: number, H: number) => void;
 
 const bgPatterns: PatternFn[] = [
@@ -583,7 +596,7 @@ previewCoverBtn.addEventListener('click', () => {
   coverPreviewMeta.textContent = meta;
 });
 
-// ── Convert button state ───────────────────────────────────────
+// ── Convert button state ───────────────────────────────
 const convertButton  = document.querySelector<HTMLButtonElement>('#convertButton')!;
 const downloadButton = document.querySelector<HTMLButtonElement>('#downloadButton')!;
 const statusText     = document.querySelector<HTMLSpanElement>('#statusText')!;
@@ -605,7 +618,7 @@ function updateConvertButton() {
   }
 }
 
-// ── Worker management ──────────────────────────────────────────
+// ── Worker management ────────────────────────────────
 let currentWorker: Worker | null = null;
 let resultBlob: Blob | null = null;
 let resultFileName = '';
@@ -619,8 +632,8 @@ function buildWorker(): Worker {
 function buildOptions() {
   return {
     convertRuby: rubyToggle.checked,
-    addEmptySpan: spanToggle.checked,
-    convertBrToEmptyP: brToggle.checked,
+    indentMode: getIndentMode(),
+    brMode: getBrMode(),
     cover: coverGenerateRadio.checked
       ? { mode: 'generate' as const, imageBuffer: null as unknown as ArrayBuffer, imageType: 'image/jpeg' }
       : { mode: 'none' as const },
@@ -636,7 +649,7 @@ async function canvasToJpegBuffer(canvas: HTMLCanvasElement): Promise<ArrayBuffe
   });
 }
 
-// ── Convert – EPUB file ────────────────────────────────────────
+// ── Convert – EPUB file ────────────────────────────────
 async function convertEpubFile() {
   if (!selectedFile) return;
   terminateWorker();
@@ -659,7 +672,7 @@ async function convertEpubFile() {
   worker.postMessage({ type: 'process', payload: { fileName: selectedFile.name, fileBuffer, options } }, transfers);
 }
 
-// ── Convert – Aozora Bunko ─────────────────────────────────────
+// ── Convert – Aozora Bunko ───────────────────────
 async function convertAozora() {
   if (!selectedAozoraBook) return;
   terminateWorker();
@@ -710,7 +723,7 @@ async function convertAozora() {
   );
 }
 
-// ── Proxy fetch（ArrayBuffer 版）──────────────────────────────
+// ── Proxy fetch（ArrayBuffer 版）─────────────────────────
 async function fetchBytesViaProxy(url: string): Promise<ArrayBuffer> {
   const proxyUrl = `/proxy?url=${encodeURIComponent(url)}`;
   const res = await fetch(proxyUrl);
@@ -731,7 +744,7 @@ async function fetchHtmlBytesFromZip(zipUrl: string): Promise<ArrayBuffer> {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
-// ── Worker message handler ─────────────────────────────────────
+// ── Worker message handler ────────────────────────────
 function handleWorkerMessage(event: MessageEvent) {
   const { type, payload } = event.data;
   if (type === 'progress') { setStatus(payload.message, payload.progress); return; }
@@ -740,7 +753,7 @@ function handleWorkerMessage(event: MessageEvent) {
     const s = payload.summary;
     document.querySelector<HTMLElement>('#statHtml')!.textContent  = String(s.htmlFiles);
     document.querySelector<HTMLElement>('#statRuby')!.textContent  = String(s.rubyConversions);
-    document.querySelector<HTMLElement>('#statSpan')!.textContent  = String(s.spanInsertions);
+    document.querySelector<HTMLElement>('#statIndent')!.textContent = String(s.indentConversions);
     document.querySelector<HTMLElement>('#statBr')!.textContent    = String(s.brConversions);
     document.querySelector<HTMLElement>('#statWarn')!.textContent  = String(s.warnings.length);
     const logLines = [...s.logs, ...(s.warnings.length ? ['', '--- 警告 ---', ...s.warnings] : [])];
@@ -752,13 +765,13 @@ function handleWorkerMessage(event: MessageEvent) {
   if (type === 'error') { setStatus(`エラー: ${payload.message}`, 0); convertButton.disabled = false; terminateWorker(); }
 }
 
-// ── Convert button ─────────────────────────────────────────────
+// ── Convert button ─────────────────────────────────────
 convertButton.addEventListener('click', () => {
   if (activeTab === 'epub') convertEpubFile();
   else convertAozora();
 });
 
-// ── Download ───────────────────────────────────────────────────
+// ── Download ────────────────────────────────────────
 downloadButton.addEventListener('click', () => {
   if (!resultBlob) return;
   const url = URL.createObjectURL(resultBlob);
