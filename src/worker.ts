@@ -7,10 +7,15 @@ type CoverOptions =
   | { mode: 'none' }
   | { mode: 'generate'; imageBuffer: ArrayBuffer; imageType: string };
 
+type IndentMode = 'legacy' | 'newFirmware';
+type BrMode = 'legacy' | 'newFirmware';
+
 type Options = {
   convertRuby: boolean;
-  addEmptySpan: boolean;
-  convertBrToEmptyP: boolean;
+  applyIndent: boolean;
+  indentMode: IndentMode;
+  applyBr: boolean;
+  brMode: BrMode;
   cover: CoverOptions;
 };
 
@@ -23,7 +28,6 @@ type ProcessRequest = {
   };
 };
 
-// xhtmlBytes: ArrayBuffer として受け取ることで Shift_JIS 文字化けを防ぐ
 type BuildAozoraRequest = {
   type: 'build_aozora';
   payload: {
@@ -37,7 +41,7 @@ type BuildAozoraRequest = {
 type Summary = {
   htmlFiles: number;
   rubyConversions: number;
-  spanInsertions: number;
+  indentConversions: number;
   brConversions: number;
   warnings: string[];
   logs: string[];
@@ -46,34 +50,30 @@ type Summary = {
 const ctx: Worker = self as unknown as Worker;
 
 ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
-  // ── 青空文庫ルート（EPUB 3 縦書き）──────────────────────────────────
   if (event.data.type === 'build_aozora') {
     try {
       const { xhtmlBytes, title, author, options } = event.data.payload;
       const summary: Summary = {
         htmlFiles: 1,
         rubyConversions: 0,
-        spanInsertions: 0,
+        indentConversions: 0,
         brConversions: 0,
         warnings: [],
         logs: [],
       };
 
-      // ① Shift_JIS / UTF-8 を正しく判定してデコード
       postProgress(10, '文字コードを判定・デコード中...');
       const rawXhtml = decodeBytes(new Uint8Array(xhtmlBytes));
 
-      // ② Xteink 向け変換（ルビ・span・br）を直接適用
       postProgress(20, 'Xteink向け変換処理中...');
       const processed = processMarkup(rawXhtml, options);
       summary.rubyConversions = processed.rubyConversions;
-      summary.spanInsertions  = processed.spanInsertions;
-      summary.brConversions   = processed.brConversions;
+      summary.indentConversions = processed.indentConversions;
+      summary.brConversions = processed.brConversions;
       summary.logs.push(
-        `content.xhtml: ruby=${processed.rubyConversions}, span=${processed.spanInsertions}, br=${processed.brConversions}`,
+        `content.xhtml: ruby=${processed.rubyConversions}, indent=${processed.indentConversions}, br=${processed.brConversions}`,
       );
 
-      // ③ <body> 内だけ抜き出して二重タグを防ぐ
       postProgress(40, 'XHTML を正規化中...');
       const safeTitle  = escapeXml(title  || '無題');
       const safeAuthor = escapeXml(author || '');
@@ -82,7 +82,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
 
       const bodyContent = extractBodyContent(processed.text);
 
-      // EPUB 3 縦書き content.xhtml
       const contentXhtml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE html>',
@@ -99,7 +98,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</html>',
       ].join('\n');
 
-      // EPUB 3 必須の nav.xhtml
       const navXhtml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE html>',
@@ -120,7 +118,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</html>',
       ].join('\n');
 
-      // 縦書き CSS
       const verticalCss = [
         '@charset "UTF-8";',
         '',
@@ -149,8 +146,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '}',
       ].join('\n');
 
-      // ④ EPUB 3 OPF 構築
-      //    page-progression-direction="rtl" で右綴じ（日本語縦書き）
       postProgress(60, 'EPUB 3 メタデータを生成中...');
 
       const coverManifestItem = hasImage
@@ -197,7 +192,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         '</container>',
       ].join('\n');
 
-      // ⑤ ZIP 組み立て（mimetype は必ず level:0 かつ先頭）
       postProgress(80, 'EPUB を組み立て中...');
 
       const files: Record<string, [Uint8Array, { level: number }]> = {
@@ -234,7 +228,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
     return;
   }
 
-  // ── 通常 EPUB 変換ルート ──────────────────────────────────────
   if (event.data.type !== 'process') return;
 
   try {
@@ -245,7 +238,7 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
     const summary: Summary = {
       htmlFiles: 0,
       rubyConversions: 0,
-      spanInsertions: 0,
+      indentConversions: 0,
       brConversions: 0,
       warnings: [],
       logs: [],
@@ -278,25 +271,33 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
         const source = decodeBytes(bytes);
         const result = processMarkup(source, options);
         summary.rubyConversions += result.rubyConversions;
-        summary.spanInsertions  += result.spanInsertions;
+        summary.indentConversions += result.indentConversions;
         summary.brConversions   += result.brConversions;
         summary.logs.push(
-          `${name}: ruby=${result.rubyConversions}, span=${result.spanInsertions}, br=${result.brConversions}`,
+          `${name}: ruby=${result.rubyConversions}, indent=${result.indentConversions}, br=${result.brConversions}`,
         );
         outputEntries[name] = [strToU8(result.text), { level: 6 }];
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        summary.warnings.push(`WARN: ${name}: ${message}`);
+        summary.warnings.push(`${name}: ${message}`);
         outputEntries[name] = [bytes, { level: 6 }];
       }
     }
 
     if (options.convertRuby && summary.rubyConversions === 0 && summary.htmlFiles > 0)
       summary.logs.push('INFO: ルビタグが見つかりませんでした（元のEPUBにルビがない可能性があります）');
-    if (options.addEmptySpan && summary.spanInsertions === 0 && summary.htmlFiles > 0)
-      summary.logs.push('INFO: <p>タグが見つかりませんでした');
-    if (options.convertBrToEmptyP && summary.brConversions === 0 && summary.htmlFiles > 0)
-      summary.logs.push('INFO: pタグ外の<br>タグが見つかりませんでした');
+    if (options.applyIndent && summary.indentConversions === 0 && summary.htmlFiles > 0)
+      summary.logs.push(
+        options.indentMode === 'legacy'
+          ? 'INFO: <p>タグが見つかりませんでした'
+          : 'INFO: <p>タグが見つからず、セクション結合を行いませんでした',
+      );
+    if (options.applyBr && summary.brConversions === 0 && summary.htmlFiles > 0)
+      summary.logs.push(
+        options.brMode === 'legacy'
+          ? 'INFO: pタグ外の<br>タグが見つかりませんでした'
+          : 'INFO: pタグ外の<br>タグが見つからず、<p>　<br /></p>への変換は発生しませんでした',
+      );
 
     if (options.cover.mode === 'generate' && options.cover.imageBuffer) {
       postProgress(85, '表紙を適用中...');
@@ -345,8 +346,6 @@ ctx.onmessage = (event: MessageEvent<ProcessRequest | BuildAozoraRequest>) => {
   }
 };
 
-// ── ユーティリティ ─────────────────────────────────────────────
-
 function postProgress(progress: number, message: string) {
   ctx.postMessage({ type: 'progress', payload: { progress, message } });
 }
@@ -357,10 +356,6 @@ function buildOutputName(fileName: string) {
     : `${fileName}_x4.epub`;
 }
 
-/**
- * 青空文庫 XHTML から <body> 内のコンテンツだけを抜き出す。
- * 完全な XHTML 文書でない場合はそのまま返す。
- */
 function extractBodyContent(html: string): string {
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   return bodyMatch ? bodyMatch[1].trim() : html.trim();
@@ -456,7 +451,7 @@ function decodeBytes(bytes: Uint8Array): string {
   const metaEnc = probe.match(/<meta[^>]+charset=["']?([\w-]+)["'?]/i);
   const charset = (xmlEnc?.[1] || metaEnc?.[1] || 'utf-8').toLowerCase();
   try {
-    return new TextDecoder(charset, { fatal: true }).decode(bytes);
+    return new TextDecoder(charset, { fatal: false }).decode(bytes);
   } catch {
     return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   }
@@ -464,11 +459,41 @@ function decodeBytes(bytes: Uint8Array): string {
 
 function processMarkup(source: string, options: Options) {
   let text = source;
-  let rubyConversions = 0, spanInsertions = 0, brConversions = 0;
-  if (options.convertRuby)     { const r = convertRubyToParentheses(text); text = r.text; rubyConversions = r.count; }
-  if (options.addEmptySpan)    { const r = addEmptySpanInsideP(text);      text = r.text; spanInsertions  = r.count; }
-  if (options.convertBrToEmptyP) { const r = convertBrToEmptyP(text);     text = r.text; brConversions   = r.count; }
-  return { text, rubyConversions, spanInsertions, brConversions };
+  let rubyConversions = 0;
+  let indentConversions = 0;
+  let brConversions = 0;
+
+  if (options.convertRuby) {
+    const r = convertRubyToParentheses(text);
+    text = r.text;
+    rubyConversions = r.count;
+  }
+
+  if (options.applyBr) {
+    if (options.brMode === 'legacy') {
+      const r = convertBrToEmptyP(text);
+      text = r.text;
+      brConversions = r.count;
+    } else {
+      const r = convertBrToDoubleTag(text);
+      text = r.text;
+      brConversions = r.count;
+    }
+  }
+
+  if (options.applyIndent) {
+    if (options.indentMode === 'legacy') {
+      const r = addEmptySpanInsideP(text);
+      text = r.text;
+      indentConversions = r.count;
+    } else {
+      const r = wrapSectionAsSingleP(text);
+      text = r.text;
+      indentConversions = r.count;
+    }
+  }
+
+  return { text, rubyConversions, indentConversions, brConversions };
 }
 
 function convertRubyToParentheses(source: string): { text: string; count: number } {
@@ -518,6 +543,35 @@ function convertBrToEmptyP(source: string): { text: string; count: number } {
   return { text, count };
 }
 
+function convertBrToDoubleTag(source: string): { text: string; count: number } {
+  let count = 0;
+  let text = source;
+
+  text = text.replace(
+    /<p(?:\s[^>]*)?>(\s*<br\s*\/?\s*>\s*)+<\/p\s*>/gi,
+    () => {
+      count++;
+      return '<p>\u3000<br /></p>';
+    }
+  );
+
+  let depth = 0;
+  text = text.replace(
+    /(<\/p\s*>)|(<p(?:\s[^>]*)?>)|(<br\s*\/?>)/gi,
+    (match, closeP, openP, br) => {
+      if (openP !== undefined) { depth++; return match; }
+      if (closeP !== undefined) { if (depth > 0) depth--; return match; }
+      if (br !== undefined && depth === 0) {
+        count++;
+        return '<p>\u3000<br /></p>';
+      }
+      return match;
+    }
+  );
+
+  return { text, count };
+}
+
 function addEmptySpanInsideP(source: string): { text: string; count: number } {
   let count = 0;
   const brOnlyP =
@@ -535,4 +589,35 @@ function addEmptySpanInsideP(source: string): { text: string; count: number } {
     '$1<span></span>',
   );
   return { text: deduped, count };
+}
+
+function wrapSectionAsSingleP(source: string): { text: string; count: number } {
+  const pBlockRegex = /<p(?:[ \t][^>]*)?>([\s\S]*?)<\/p\s*>/gi;
+  let count = 0;
+  let result = '';
+  let cursor = 0;
+  let buffer: string[] = [];
+  let match: RegExpExecArray | null;
+
+  const flush = () => {
+    if (buffer.length === 0) return;
+    result += `<p>${buffer.join('<br />')}<br /></p>`;
+    buffer = [];
+    count++;
+  };
+
+  while ((match = pBlockRegex.exec(source)) !== null) {
+    const gap = source.slice(cursor, match.index);
+    if (gap.trim() !== '') {
+      flush();
+      result += gap;
+    }
+    buffer.push(match[1]);
+    cursor = match.index + match[0].length;
+  }
+
+  flush();
+  result += source.slice(cursor);
+
+  return { text: result, count };
 }
