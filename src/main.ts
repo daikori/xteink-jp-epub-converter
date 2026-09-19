@@ -16,7 +16,6 @@ app.innerHTML = `
           </svg>
         </span>
         <div>
-          <p class="eyebrow">Xteink JP EPUB Converter</p>
           <h1>Xteink JP EPUB Converter</h1>
         </div>
       </div>
@@ -30,11 +29,11 @@ app.innerHTML = `
         <p class="lead">Xteink には、行頭が2文字分下がる、ルビが表示されない、改行が無視されるなどといった仕様があります。本ウェブアプリでは、これらの問題を解消するため、以下の内容でEPUBを変換します。</p>
         <ul class="feature-list" role="list">
           <li>ルビタグ を「漢字（かんじ）」のように変換します</li>
-          <li>各 p タグ先頭の直後に空 span を追加します。これにより Xteink 側に p タグを誤認させ、行頭の字下げを文章側の行頭（全角スペース）で見るようにします</li>
+          <li>字下げについては、HTMLタグを変換することによって極力文章レイアウトを忠実に表示できるようにします</li>
           <li>空白行を挿入する目的で入れられた改行（ br タグ）を p タグ + 半角スペースに変換して、Xteink 側に改行として認識させます</li>
           <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
           <li>青空文庫から直接作品を検索して変換するタブも利用できます</li>
-          <li>最新ファームウェア（行頭を強制的に1字下げする設定に対応した端末）向けに、1セクションを1つの p タグへまとめる字下げ方式と、&lt;p&gt;&lt;br /&gt;&lt;/p&gt; による改行方式を、それぞれ有効化チェックと方式選択で切り替えられます</li>
+          <li>旧ファームウェアを利用している端末でレイアウトがうまく変換されない場合は、旧FW方式にチェックを入れて試してみてください</li>
         </ul>
       </section>
 
@@ -85,18 +84,14 @@ app.innerHTML = `
         <div class="toggles">
           <label class="toggle"><input id="rubyToggle" type="checkbox" checked />ルビを括弧書きへ変換</label>
         </div>
-        <label class="toggle"><input id="indentModeEnable" type="checkbox" checked />字下げオプションを有効にする</label>
-        <fieldset class="option-group">
-          <legend>字下げ方式</legend>
-          <label class="toggle"><input type="radio" name="indentMode" value="legacy" checked />従来方式（pタグ先頭に空 spanを追加）</label>
-          <label class="toggle"><input type="radio" name="indentMode" value="newFirmware" />新ファームウェア対応（1セクションを1つのpタグにまとめ、行末に&lt;br /&gt;を追加）</label>
-        </fieldset>
-        <label class="toggle"><input id="brModeEnable" type="checkbox" checked />改行オプションを有効にする</label>
-        <fieldset class="option-group">
-          <legend>改行方式（pタグ外の&lt;br&gt;タグ）</legend>
-          <label class="toggle"><input type="radio" name="brMode" value="legacy" checked />従来方式（&lt;p&gt; &lt;/p&gt; に変換）</label>
-          <label class="toggle"><input type="radio" name="brMode" value="newFirmware" />新ファームウェア対応（&lt;p&gt;　&lt;br /&gt;&lt;/p&gt; に変換）</label>
-        </fieldset>
+        <div class="option-row">
+          <label class="toggle"><input id="indentModeEnable" type="checkbox" checked />字下げオプションを有効にする</label>
+          <label class="toggle"><input id="indentModeLegacy" type="checkbox" />旧FW方式</label>
+        </div>
+        <div class="option-row">
+          <label class="toggle"><input id="brModeEnable" type="checkbox" checked />改行オプションを有効にする</label>
+          <label class="toggle"><input id="brModeLegacy" type="checkbox" />旧FW方式</label>
+        </div>
 
         <div class="cover-section">
           <p class="kicker">表紙設定</p>
@@ -383,7 +378,7 @@ function setAozoraStatus(msg: string, show = true) {
 }
 
 function escHtml(str: string): string {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return str.replace(/&/g, '\u0026amp;').replace(/</g, '\u0026lt;').replace(/>/g, '\u0026gt;').replace(/"/g, '\u0026quot;');
 }
 
 async function searchAozora(query: string): Promise<void> {
@@ -434,8 +429,8 @@ aozoraQueryEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { cons
 const rubyToggle = document.querySelector<HTMLInputElement>('#rubyToggle')!;
 const indentModeEnable = document.querySelector<HTMLInputElement>('#indentModeEnable')!;
 const brModeEnable = document.querySelector<HTMLInputElement>('#brModeEnable')!;
-const indentModeRadios = document.querySelectorAll<HTMLInputElement>('input[name="indentMode"]');
-const brModeRadios = document.querySelectorAll<HTMLInputElement>('input[name="brMode"]');
+const indentModeLegacy = document.querySelector<HTMLInputElement>('#indentModeLegacy')!;
+const brModeLegacy = document.querySelector<HTMLInputElement>('#brModeLegacy')!;
 const coverNoneRadio = document.querySelector<HTMLInputElement>('#coverNone')!;
 const coverGenerateRadio = document.querySelector<HTMLInputElement>('#coverGenerate')!;
 const coverGeneratePanel = document.querySelector<HTMLElement>('#coverGeneratePanel')!;
@@ -448,16 +443,16 @@ const coverPreviewMeta = document.querySelector<HTMLParagraphElement>('#coverPre
   r.addEventListener('change', () => { coverGeneratePanel.hidden = !coverGenerateRadio.checked; })
 );
 
-function syncIndentModeRadios() {
-  indentModeRadios.forEach((r) => { r.disabled = !indentModeEnable.checked; });
+function syncIndentModeLegacy() {
+  indentModeLegacy.disabled = !indentModeEnable.checked;
 }
-function syncBrModeRadios() {
-  brModeRadios.forEach((r) => { r.disabled = !brModeEnable.checked; });
+function syncBrModeLegacy() {
+  brModeLegacy.disabled = !brModeEnable.checked;
 }
-indentModeEnable.addEventListener('change', syncIndentModeRadios);
-brModeEnable.addEventListener('change', syncBrModeRadios);
-syncIndentModeRadios();
-syncBrModeRadios();
+indentModeEnable.addEventListener('change', syncIndentModeLegacy);
+brModeEnable.addEventListener('change', syncBrModeLegacy);
+syncIndentModeLegacy();
+syncBrModeLegacy();
 
 tabBtns.forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -469,19 +464,17 @@ tabBtns.forEach((btn) => {
       indentModeEnable.checked = true;
       brModeEnable.checked = true;
     }
-    syncIndentModeRadios();
-    syncBrModeRadios();
+    syncIndentModeLegacy();
+    syncBrModeLegacy();
   });
 });
 
 function getIndentMode(): 'legacy' | 'newFirmware' {
-  const el = document.querySelector<HTMLInputElement>('input[name="indentMode"]:checked');
-  return (el?.value as 'legacy' | 'newFirmware') ?? 'legacy';
+  return indentModeLegacy.checked ? 'legacy' : 'newFirmware';
 }
 
 function getBrMode(): 'legacy' | 'newFirmware' {
-  const el = document.querySelector<HTMLInputElement>('input[name="brMode"]:checked');
-  return (el?.value as 'legacy' | 'newFirmware') ?? 'legacy';
+  return brModeLegacy.checked ? 'legacy' : 'newFirmware';
 }
 
 type PatternFn = (ctx: CanvasRenderingContext2D, W: number, H: number) => void;
