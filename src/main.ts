@@ -33,7 +33,7 @@ app.innerHTML = `
           <li>空白行を挿入する目的で入れられた改行（ br タグ）を p タグ + 半角スペースに変換して、Xteink 側に改行として認識させます</li>
           <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
           <li>青空文庫から直接作品を検索して変換するタブも利用できます</li>
-          <li>旧ファームウェアを利用している端末でレイアウトがうまく変換されない場合は、旧ファームウェア方式にチェックを入れて試してみてください</li>
+          <li>旧ファームウェアを利用している端末でレイアウトがうまく変換されない場合は、旧FW方式にチェックを入れて試してみてください</li>
         </ul>
       </section>
 
@@ -86,11 +86,11 @@ app.innerHTML = `
         </div>
         <div class="option-row">
           <label class="toggle"><input id="indentModeEnable" type="checkbox" checked />字下げオプションを有効にする</label>
-          <label class="toggle"><input id="indentModeLegacy" type="checkbox" />旧ファームウェア方式</label>
+          <label class="toggle"><input id="indentModeLegacy" type="checkbox" />旧FW方式</label>
         </div>
         <div class="option-row">
           <label class="toggle"><input id="brModeEnable" type="checkbox" checked />改行オプションを有効にする</label>
-          <label class="toggle"><input id="brModeLegacy" type="checkbox" />旧ファームウェア方式</label>
+          <label class="toggle"><input id="brModeLegacy" type="checkbox" />旧FW方式</label>
         </div>
 
         <div class="cover-section">
