@@ -287,6 +287,10 @@ h3 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
   font-size: 14px; cursor: pointer;
 }
 .toggle input { accent-color: var(--accent); cursor: pointer; }
+.option-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 20px;
+  margin-bottom: 8px;
+}
 
 /* ─ Cover section ────────────────────────────── */
 .cover-section {
