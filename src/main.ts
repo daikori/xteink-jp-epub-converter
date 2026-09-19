@@ -34,7 +34,7 @@ app.innerHTML = `
           <li>空白行を挿入する目的で入れられた改行（ br タグ）を p タグ + 半角スペースに変換して、Xteink 側に改行として認識させます</li>
           <li>指定した EPUB はサーバーに保存しません。すべてブラウザで完結するようにしています</li>
           <li>青空文庫から直接作品を検索して変換するタブも利用できます</li>
-          <li>最新ファームウェア（行頭を強制的に1字下げする設定に対応した端末）向けに、1セクションを1つの p タグへまとめる字下げ方式と、<p><br /></p> による改行方式を、それぞれ有効化チェックで切り替えられます（旧ファームウェアの端末では「旧ファームウェア方式」にチェックしてください）</li>
+          <li>最新ファームウェア（行頭を強制的に1字下げする設定に対応した端末）向けに、1セクションを1つの p タグへまとめる字下げ方式と、\u0026lt;p\u0026gt;\u0026lt;br /\u0026gt;\u0026lt;/p\u0026gt; による改行方式を、それぞれ有効化チェックで切り替えられます（旧ファームウェアの端末では「旧ファームウェア方式」にチェックしてください）</li>
         </ul>
       </section>
 
@@ -379,7 +379,7 @@ function setAozoraStatus(msg: string, show = true) {
 }
 
 function escHtml(str: string): string {
-  return str.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
+  return str.replace(/&/g, '\u0026amp;').replace(/</g, '\u0026lt;').replace(/>/g, '\u0026gt;').replace(/"/g, '\u0026quot;');
 }
 
 async function searchAozora(query: string): Promise<void> {
